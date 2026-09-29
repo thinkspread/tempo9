@@ -48,8 +48,8 @@ jobs:
 
       # A skip is not a pass. Both frameworks print a green summary for zero
       # tests, and SwiftPM runs each test bundle separately, so the counts are
-      # summed and held to a floor: at the time of writing 24 XCTest
-      # (GGUFKitTests 10, Tempo9Tests 14) and 57 Swift Testing
+      # summed and held to a floor: at the time of writing 28 XCTest
+      # (GGUFKitTests 10, Tempo9Tests 18) and 71 Swift Testing
       # (Tempo9KitTests). Raise the floors when tests are added; lowering one
       # should be a decision somebody wrote down.
       - name: Test
@@ -62,8 +62,8 @@ jobs:
           st=$(grep -oE 'Test run with [0-9]+ tests' test.log \
                | awk '{ s += $4 } END { print s + 0 }')
           echo "XCTest: $xc tests   Swift Testing: $st tests"
-          [ "$xc" -ge 24 ] || { echo "::error::XCTest ran $xc tests, expected at least 24"; exit 1; }
-          [ "$st" -ge 57 ] || { echo "::error::Swift Testing ran $st tests, expected at least 57"; exit 1; }
+          [ "$xc" -ge 28 ] || { echo "::error::XCTest ran $xc tests, expected at least 28"; exit 1; }
+          [ "$st" -ge 71 ] || { echo "::error::Swift Testing ran $st tests, expected at least 71"; exit 1; }
 
       # Release too. -O has caught things debug did not, and the app links
       # release.
@@ -81,8 +81,8 @@ jobs:
           swift package describe --type json > describe.json
           engine=$(python3 -c 'import json; print(next(t["type"] for t in json.load(open("describe.json"))["targets"] if t["name"] == "CTempo9Engine"))')
           got=$(python3 -c 'import json; print(" ".join(sorted(p["name"] for p in json.load(open("describe.json"))["products"])))')
-          want="Tempo9 ggufctl vitctl"
-          [ "$engine" = binary ] && want="Tempo9 ggufctl localctl tempo9 vitctl"
+          want="GGUFKit Tempo9 VisionTowerKit ggufctl vitctl"
+          [ "$engine" = binary ] && want="GGUFKit Tempo9 VisionTowerKit ggufctl localctl tempo9 vitctl"
           [ -f Sources/asgraphdiff/main.swift ] && want=$(echo $want asgraphdiff | tr ' ' '\n' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
           [ "$got" = "$want" ] || {
             echo "::error::engine is $engine; products: got [$got], want [$want]"; exit 1; }

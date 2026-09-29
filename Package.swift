@@ -98,7 +98,9 @@ let engineXCFramework = FileManager.default.fileExists(
 
 /// The published engine: Tempo9Engine.xcframework.zip on a GitHub release,
 /// and SwiftPM's checksum of it (packaging/release.sh prints both). Empty
-/// until the first release. When set, a checkout with no engine staged --
+/// until the first release. A release that does not change the engine keeps
+/// pointing at the one that did: 1.1.0 changed only the Swift products, so
+/// its engine is still the 1.0.0 asset. When set, a checkout with no engine staged --
 /// every outside developer's -- downloads it and links it like any binary
 /// target; a staged engine still wins, so maintainers test what they build.
 let releaseEngineURL =
@@ -144,15 +146,24 @@ let hasASGraphDiff = FileManager.default.fileExists(
 // Xcode 16.4 on GitHub's macos-15 runners, "unable to type-check this
 // expression in reasonable time" after two minutes. Keep it in statements.
 
-// ONE public library.  An app developer writes `import Tempo9` and gets
-// LocalSession -- chat, tool calls, vision, prefix cache.  The engine binding
-// (Tempo9Engine) and the C shim (CTempo9Engine) are internal: exporting them
-// would make every symbol below the SDK a permanent API promise, and nobody
-// outside needs to hold the engine directly.  ggufctl/vitctl/localctl (and
+// THREE public libraries.  An app developer writes `import Tempo9` and gets
+// LocalSession -- chat, tool calls, vision, prefix cache.  GGUFKit reads a
+// model file and tokenizes, on Foundation alone.  VisionTowerKit runs the
+// vision and audio towers, and it is exported because LocalSession takes
+// ImageEmbeddings and nothing else public could produce them: with Tempo9
+// alone, an app outside this package could not show the model an image.
+//
+// The engine binding (Tempo9Engine) and the C shim (CTempo9Engine) stay
+// internal: exporting them would make every symbol below the SDK a permanent
+// API promise, and nobody outside needs to hold the engine directly -- the
+// two facts an app does want from it, the build and the GEMM backend, are
+// forwarded as Tempo9's EngineInfo.  ggufctl/vitctl/localctl (and
 // asgraphdiff, where its source is) are development tools and are not
 // shipped.
 var products: [Product] = [
     .library(name: "Tempo9", targets: ["Tempo9"]),
+    .library(name: "GGUFKit", targets: ["GGUFKit"]),
+    .library(name: "VisionTowerKit", targets: ["VisionTowerKit"]),
 ]
 if engineAvailable {
     // Product name is what users type; the TARGET must differ in more than

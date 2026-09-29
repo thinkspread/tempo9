@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Jiejing Zhang.
 //
 // The three engine types that Tempo9's OWN public API names, re-exposed so a
-// caller can name them too.
+// caller can name them too -- and, at the bottom, the two facts about the
+// linked engine that an app shows its user.
 //
 // Without this, three public methods are uncallable from outside the package:
 // `stream(config:)` takes a SamplingConfig, `stream(images:)` takes an
@@ -28,3 +29,26 @@ import Tempo9Engine
 public typealias SamplingConfig = Tempo9Engine.SamplingConfig
 public typealias EngineStats = Tempo9Engine.EngineStats
 public typealias ImageEmbeddings = Tempo9Engine.ImageEmbeddings
+
+/// Which engine build is linked, and which GEMM path it is running.
+///
+/// Forwarded one property at a time, for the reason above: an About panel
+/// and a bug report need these two strings, not the engine module.
+public enum EngineInfo {
+    /// Engine build string, for an About panel and bug reports.
+    public static var version: String { Engine.version }
+
+    /// "metal" or "cpu": the GEMM path actually running, as the engine
+    /// reports it. A silent CPU fallback is several times slower and
+    /// otherwise invisible, which is why an app should show this rather
+    /// than a label it assumes.
+    ///
+    /// Asking initialises the engine's Metal context, so this selects the
+    /// backend first (LocalSession.prepareEnvironment, idempotent): a badge
+    /// that asked before the environment was set once caused the very CPU
+    /// fallback it existed to reveal.
+    public static var gemmBackend: String {
+        LocalSession.prepareEnvironment()
+        return Engine.gemmBackend
+    }
+}

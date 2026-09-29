@@ -64,12 +64,13 @@ Two ways, and they are different products rather than two flavours of one:
   Nothing to link, any language. Claude Code and Codex speak their own
   protocols and both are served — see [manual/claude-code.md](manual/claude-code.md)
   for what WebSearch does on a local model.
-- **In-process, on Apple platforms.** The Swift SDK in this repository — one
-  library, `import Tempo9` — holds the engine inside your app: no server, no
+- **In-process, on Apple platforms.** The Swift SDK in this repository —
+  `import Tempo9`, plus `VisionTowerKit` for image input and `GGUFKit` for
+  reading model files — holds the engine inside your app: no server, no
   localhost, one copy of the weights. See [docs/swift-sdk.md](docs/swift-sdk.md).
 
 ```swift
-.package(url: "https://github.com/thinkspread/tempo9", from: "1.0.0")
+.package(url: "https://github.com/thinkspread/tempo9", from: "1.1.0")
 ```
 
 SwiftPM downloads the engine (`Tempo9Engine.xcframework`) from the release;

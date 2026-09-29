@@ -71,4 +71,46 @@ final class ThinkSplitterTests: XCTestCase {
         XCTAssertEqual(c, "hi  done")
         XCTAssertEqual(r, "hmm")
     }
+
+    // MARK: Gemma 4 channel tags
+    //
+    // Moved from the Eyes On app's `tooltest`, which printed pass or fail and
+    // always exited 0.
+
+    private func gemma() -> ThinkSplitter {
+        ThinkSplitter(openTag: "<|channel>", closeTag: "<channel|>")
+    }
+
+    /// The observed shape: with thinking off, the template appends an empty,
+    /// already-closed thinking block, the model writes into it anyway, and
+    /// the reply arrives led by a lone close tag.
+    func testGemmaCloseTagWithoutOpenTag() {
+        let (c, r) = drain(["The user wants a summary.<channel|>Here it is."],
+                           splitter: gemma())
+        XCTAssertEqual(r, "The user wants a summary.")
+        XCTAssertEqual(c, "Here it is.")
+    }
+
+    /// The channel name is ordinary text after the tag, not part of it.
+    func testGemmaChannelNameIsReasoning() {
+        let (c, r) = drain(["<|channel>thought\nplanning<channel|>answer"],
+                           splitter: gemma())
+        XCTAssertEqual(r, "thought\nplanning")
+        XCTAssertEqual(c, "answer")
+    }
+
+    /// A repeated close tag mid-answer is a control token, not text.
+    func testGemmaRepeatedCloseTagIsDropped() {
+        let (c, r) = drain(["<|channel>t<channel|>one<channel|>two"],
+                           splitter: gemma())
+        XCTAssertEqual(r, "t")
+        XCTAssertEqual(c, "onetwo")
+    }
+
+    func testGemmaTagSplitAcrossChunks() {
+        let (c, r) = drain(["<|channel>thinking<chan", "nel|>done"],
+                           splitter: gemma())
+        XCTAssertEqual(r, "thinking")
+        XCTAssertEqual(c, "done")
+    }
 }

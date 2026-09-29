@@ -11,7 +11,9 @@ half of it — Metal, the Neural Engine towers, and the host.
 
 | product | what it does | Apple-only? |
 |---|---|---|
-| `Tempo9` (library) | the one public module: engine session + OpenAI/Anthropic/Ollama-shaped server | yes (links a macOS engine build) |
+| `Tempo9` (library) | the SDK: engine session + OpenAI/Anthropic/Ollama-shaped server, and `EngineInfo` (engine build, GEMM backend) | yes (links a macOS engine build) |
+| `GGUFKit` (library) | read a `.gguf` — metadata, tensors, tokenizers — on Foundation alone | no |
+| `VisionTowerKit` (library) | vision and audio towers: an image or a sound in, the `ImageEmbeddings` a `LocalSession` takes out | yes (Core ML, Metal) |
 | `tempo9` (executable) | **the Kit's demo**: `tempo9 --gguf model.gguf` — one file, one command, four API dialects | yes |
 
 ### The CLI is a demo, and that is the point
@@ -29,9 +31,11 @@ we would write, and it cannot drift, because it is compiled and shipped.
 Read it first. Then [`examples/`](../examples/) for requests against a running
 server, and [`manual/`](../manual/) for what the flags mean.
 
-Internally that splits into targets (`GGUFKit` gguf+tokenizers, `ChatTemplateKit`
-Jinja, `VisionTowerKit` vision/audio towers, `Tempo9Engine` the C-ABI binding),
-but only `Tempo9` is exported — an internal target layout is not an API promise.
+Internally there are two more targets, `ChatTemplateKit` (Jinja) and
+`Tempo9Engine` (the C-ABI binding). They are not exported — an internal target
+layout is not an API promise. `VisionTowerKit` is exported since 1.1.0 because
+`LocalSession` takes `ImageEmbeddings` and nothing else public could produce
+them: with `Tempo9` alone, an app could not show the model an image.
 `ggufctl` / `vitctl` / `localctl` are development tools and are not shipped.
 
 A host that only needs to read a model file and tokenize should not have to
@@ -41,7 +45,7 @@ Foundation and nothing else.
 ## Use it
 
 ```swift
-.package(url: "https://github.com/thinkspread/tempo9", from: "1.0.0")
+.package(url: "https://github.com/thinkspread/tempo9", from: "1.1.0")
 ```
 
 SwiftPM downloads the engine, `Tempo9Engine.xcframework`, from the GitHub
@@ -50,10 +54,12 @@ executable declared for an older macOS gets the engine's Metal backend
 switched off (the comment on `platforms` in this repository's
 Package.swift has the measurement).
 
-then take the product:
+then take the products you use:
 
 ```swift
-.product(name: "Tempo9", package: "tempo9")
+.product(name: "Tempo9", package: "tempo9"),
+.product(name: "VisionTowerKit", package: "tempo9"),  // image or audio input
+.product(name: "GGUFKit", package: "tempo9"),         // reading model files yourself
 ```
 
 ```swift
