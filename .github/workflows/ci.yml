@@ -1,0 +1,135 @@
+# Copyright (c) 2026 Jiejing Zhang.
+#
+# The engine is NOT needed to build this repository, and that is the point
+# worth protecting: `Tempo9Kit/Sources/CTempo9Engine/include/tempo9_engine.h` is
+# a vendored copy of the C ABI, so everything here COMPILES without a Tempo9
+# build. Only linking needs the engine — so a hosted runner with nothing
+# installed is a faithful environment, not a stub.
+#
+# That claim used to sit above a job that ran bare `swift build` and
+# `swift test`, both of which build EVERY target including the executables,
+# which do link. CI was red from the first push and the step meant to prove
+# the claim was never reached. Package.swift now declares the linking targets
+# only when an engine is staged, so these commands cover what a fresh clone
+# actually has -- and `swift test` finally runs GGUFKitTests, which could not
+# run at all while the whole test build failed at link.
+#
+# The test targets link too. With no engine staged they link against a stub
+# of the C ABI whose every call fails (Package.swift, `testEngine`), so the
+# tests that never reach the engine run here instead of being left out --
+# and the Test step counts them, because "passed" with nothing run is how
+# this repository has been fooled before.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      # Debug first: it is the faster failure, and a type error shows up
+      # here rather than after an optimising build.
+      - name: Build (debug)
+        run: swift build
+
+      # A skip is not a pass. Both frameworks print a green summary for zero
+      # tests, and SwiftPM runs each test bundle separately, so the counts are
+      # summed and held to a floor: at the time of writing 24 XCTest
+      # (GGUFKitTests 10, Tempo9Tests 14) and 57 Swift Testing
+      # (Tempo9KitTests). Raise the floors when tests are added; lowering one
+      # should be a decision somebody wrote down.
+      - name: Test
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee test.log
+          xc=$(awk '/Test Suite .All tests. (passed|failed)/ { getline
+                    for (i = 1; i <= NF; i++) if ($i == "Executed") s += $(i + 1) }
+                    END { print s + 0 }' test.log)
+          st=$(grep -oE 'Test run with [0-9]+ tests' test.log \
+               | awk '{ s += $4 } END { print s + 0 }')
+          echo "XCTest: $xc tests   Swift Testing: $st tests"
+          [ "$xc" -ge 24 ] || { echo "::error::XCTest ran $xc tests, expected at least 24"; exit 1; }
+          [ "$st" -ge 57 ] || { echo "::error::Swift Testing ran $st tests, expected at least 57"; exit 1; }
+
+      # Release too. -O has caught things debug did not, and the app links
+      # release.
+      - name: Build (release)
+        run: swift build -c release
+
+      # A runner has no engine, so the manifest must not offer `tempo9` or
+      # `localctl` here. If it does, someone made the linking targets
+      # unconditional again and the next step's failure would be confusing.
+      # asgraphdiff is declared only where its source is (Package.swift).
+      - name: The manifest offers only engine-free products
+        run: |
+          got=$(swift package describe --type json | python3 -c \
+            'import json,sys; print(" ".join(sorted(p["name"] for p in json.load(sys.stdin)["products"])))')
+          want="Tempo9 ggufctl vitctl"
+          [ -f Sources/asgraphdiff/main.swift ] && want="Tempo9 asgraphdiff ggufctl vitctl"
+          [ "$got" = "$want" ] || {
+            echo "::error::products without an engine: got [$got], want [$want]"; exit 1; }
+          echo "  $got"
+
+      # The executables are the only targets that LINK, so they are what
+      # proves the no-engine claim above rather than merely asserting it.
+      - name: The tools link without an engine build
+        run: |
+          tools="ggufctl vitctl"
+          [ -f Sources/asgraphdiff/main.swift ] && tools="$tools asgraphdiff"
+          for t in $tools; do
+            test -x ".build/release/$t" || { echo "::error::$t did not link"; exit 1; }
+            echo "  $t linked"
+          done
+
+  portability:
+    name: GGUFKit stays Foundation-only
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # A documented invariant nobody runs is a sentence, not a guarantee.
+      # The README claimed LocalInference was portable; it imports
+      # CoreGraphics and ImageIO, and no reviewer caught it. This is that
+      # claim, executable.
+      #
+      # GGUFKit is the one a non-Apple host would want first — read a .gguf,
+      # tokenize — so it is the one held to Foundation alone.
+      - name: No Apple-only imports in GGUFKit
+        run: |
+          bad=$(grep -rh '^import ' GGUFKit/Sources/GGUFKit \
+                | sort -u | grep -vE '^import (Foundation)$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error title=GGUFKit is no longer portable::$bad"
+            echo "$bad"
+            exit 1
+          fi
+          echo "GGUFKit imports Foundation only"
+
+      # ChatTemplateKit may add packages, but they have to be ones that
+      # build off-Apple: Jinja and OrderedCollections are, CoreGraphics is
+      # not.
+      - name: ChatTemplateKit stays cross-platform
+        run: |
+          bad=$(grep -rh '^import ' GGUFKit/Sources/ChatTemplateKit \
+                | sort -u \
+                | grep -vE '^import (Foundation|GGUFKit|Jinja|OrderedCollections)$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error title=ChatTemplateKit gained an Apple-only import::$bad"
+            echo "$bad"
+            exit 1
+          fi
+          echo "ChatTemplateKit imports only cross-platform modules"

@@ -1,0 +1,5 @@
+module CTempo9Engine {
+    header "include/tempo9_engine.h"
+    link "allspark_framework"
+    export *
+}

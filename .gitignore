@@ -1,0 +1,19 @@
+.build/
+.swiftpm/
+*.xcodeproj
+.DS_Store
+
+# The engine archives are staged here from an engine build; they are not
+# vendored. No trailing slash: `staged-engine/` matches only a directory, and
+# a maintainer's checkout usually has a SYMLINK here, which that pattern
+# misses -- one `git add -A` then commits a path into somebody's home
+# directory. `/staged-engine` matches a file, a symlink or a directory.
+/staged-engine
+dist/
+
+# Model files: gigabytes each, and never part of the source.
+*.gguf
+*.asgraph
+
+# Python bytecode from running the examples or tools.
+__pycache__/

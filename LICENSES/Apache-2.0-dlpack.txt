@@ -1,0 +1,7 @@
+DLPack is licensed under the Apache License, Version 2.0.
+
+The full licence text is in LICENSES/Apache-2.0.txt and applies to this
+component as well.
+
+Source: https://github.com/dmlc/dlpack
+Bundled inside XGrammar as 3rdparty/dlpack; header-only.

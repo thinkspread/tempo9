@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/thinkspread/tempo9/blob/main/SECURITY.md
+    about: Report it privately, as SECURITY.md describes. Please do not open a public issue.
