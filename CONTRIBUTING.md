@@ -59,7 +59,7 @@ XCTest and Swift Testing both print a green summary for zero tests, so CI
 counts them and holds the totals to a floor. If you add tests, raise the
 floors in `.github/workflows/ci.yml` in the same pull request.
 
-You need macOS with Xcode 16 or later; CI runs on `macos-15`.
+You need macOS 26 or later with Xcode 26 or later; CI runs on `macos-26`.
 
 ## What makes a pull request easy to take
 

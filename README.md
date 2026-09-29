@@ -84,8 +84,9 @@ repository, tempo9-skills, which is not public yet.
 
 ## Notes
 
-- Apple Silicon (arm64) only; the engine's Metal kernels ship embedded in
-  the binary — no SDK, no Xcode, no kernel files to configure.
+- Apple Silicon (arm64) and macOS 26 or later only; the engine's Metal
+  kernels ship embedded in the binary — no SDK, no Xcode, no kernel files to
+  configure.
 - The binary is signed (Developer ID). If you download via a browser and
   Gatekeeper objects, right-click → Open once; `curl` and `brew` installs
   are unaffected.

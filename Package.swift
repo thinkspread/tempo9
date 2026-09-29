@@ -207,7 +207,16 @@ if engineStaged {
 
 let package = Package(
     name: "Tempo9Kit",
-    platforms: [.macOS(.v13), .iOS(.v16)],
+    // macOS 26, not 13. SwiftPM writes the declared platform into an
+    // executable's LC_BUILD_VERSION as both minos AND sdk, and the Metal
+    // runtime compiler resolves the Metal 4 headers the engine's kernels use
+    // (metal_tensor, MetalPerformancePrimitives) by that sdk field. Declared
+    // as .v13, the engine's tensor-API probe fails with "use of undeclared
+    // identifier 'mpp'", the whole Metal backend turns itself off, and the
+    // tempo9 CLI serves on the CPU without saying so: Qwen3.5-9B Q4_K_S
+    // decoded 26 tok/s that way against 83 on Metal (M5 Pro, 2026-09-29).
+    // The engine's Metal path needs macOS 26 anyway.
+    platforms: [.macOS("26.0"), .iOS(.v16)],
     products: products,
     dependencies: [
         // Only ChatTemplateKit depends on this. Chat templates are real

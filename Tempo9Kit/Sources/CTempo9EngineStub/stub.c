@@ -28,7 +28,10 @@ te9_status te9_engine_create(te9_engine_t* out_engine) {
   if (out_engine) *out_engine = NULL;
   return TE9_ERR_ENGINE;
 }
-void te9_engine_destroy(te9_engine_t engine) { (void)engine; }
+te9_status te9_engine_destroy(te9_engine_t engine) {
+  (void)engine;
+  return TE9_ERR_ENGINE;
+}
 
 te9_status te9_engine_build_model(te9_engine_t engine,
                                   const te9_model_config* config) {
@@ -124,4 +127,62 @@ size_t te9_tokenizer_vocab_size(te9_tokenizer_t tok) { (void)tok; return 0; }
 const char* te9_tokenizer_chat_template(te9_tokenizer_t tok) {
   (void)tok;
   return NULL;
+}
+
+/* API 1.4 (capabilities table, cancel tokens, prefix-cache transfer, checked
+ * request start). Nothing in the Swift layer calls these yet; they are here so
+ * that the first caller links in a clone without an engine, and fails like the
+ * rest. */
+uint32_t te9_engine_api_version(void) { return 0; }
+te9_status te9_engine_get_api_table(size_t caller_size,
+                                    te9_engine_api_table* table) {
+  (void)caller_size; (void)table;
+  return TE9_ERR_ENGINE;
+}
+te9_status te9_engine_cancel_token_create(te9_engine_cancel_token_t* token) {
+  if (token) *token = 0;
+  return TE9_ERR_ENGINE;
+}
+te9_status te9_engine_cancel_token_cancel(te9_engine_cancel_token_t token) {
+  (void)token;
+  return TE9_ERR_ENGINE;
+}
+te9_status te9_engine_cancel_token_destroy(te9_engine_cancel_token_t token) {
+  (void)token;
+  return TE9_ERR_ENGINE;
+}
+te9_status te9_engine_export_prefix_cache(te9_engine_t engine,
+                                          const char* model_name,
+                                          const char* path,
+                                          uint64_t* node_count) {
+  (void)engine; (void)model_name; (void)path;
+  if (node_count) *node_count = 0;
+  return TE9_ERR_ENGINE;
+}
+te9_status te9_engine_import_prefix_cache(te9_engine_t engine,
+                                          const char* model_name,
+                                          const char* path,
+                                          uint64_t* node_count) {
+  (void)engine; (void)model_name; (void)path;
+  if (node_count) *node_count = 0;
+  return TE9_ERR_ENGINE;
+}
+te9_status te9_engine_get_model_llm_source(te9_engine_t engine,
+                                           const char* model_name,
+                                           te9_model_llm_source* source,
+                                           uint8_t* metadata_blob,
+                                           size_t capacity, size_t* needed) {
+  (void)engine; (void)model_name; (void)source; (void)metadata_blob;
+  (void)capacity;
+  if (needed) *needed = 0;
+  return TE9_ERR_ENGINE;
+}
+const char* te9_prefix_snapshot_storage(void) { return "none"; }
+uint64_t te9_prefix_snapshot_capture_count(void) { return 0; }
+te9_status te9_request_start_checked(te9_engine_t engine,
+                                     const te9_checked_request_config* config,
+                                     te9_request_t* request) {
+  (void)engine; (void)config;
+  if (request) *request = NULL;
+  return TE9_ERR_ENGINE;
 }

@@ -36,9 +36,14 @@
  *    std::bad_alloc); every entry point here catches everything and maps it
  *    to a code. An exception crossing into Swift is undefined behaviour.
  *
- * Threading: an `te9_engine` is safe to use from multiple threads. A single
- * `te9_request` handle is not -- drive one request from one thread, which is
- * the natural shape for an AsyncStream per request anyway.
+ * Threading: an `te9_engine` is safe to use from multiple threads. Exactly one
+ * thread owns destruction; callers must serialize te9_engine_destroy for a
+ * handle and must not start new calls after destruction begins. A single
+ * `te9_request` handle is not generally thread-safe -- serialize calls for one
+ * request. A provider advertising TE9_ENGINE_CAP_CONCURRENT_REQUEST_STOP makes
+ * one exception: te9_request_stop may run concurrently with request wait,
+ * status, finish-reason, or stats calls so it can interrupt a blocked wait.
+ * Request release must still wait until every other call has returned.
  */
 
 #ifndef TEMPO9_ENGINE_H_
@@ -56,30 +61,129 @@ extern "C" {
 typedef enum {
   TE9_OK = 0,
   TE9_ERR_UNKNOWN = 1,
-  TE9_ERR_INVALID_ARG = 2,   /* null handle, bad struct_size, bad shape   */
-  TE9_ERR_NOT_FOUND = 3,     /* model / file missing                      */
+  TE9_ERR_INVALID_ARG = 2, /* null handle, bad struct_size, bad shape   */
+  TE9_ERR_NOT_FOUND = 3,   /* model / file missing                      */
   TE9_ERR_OUT_OF_MEMORY = 4,
-  TE9_ERR_ENGINE = 5,        /* engine returned a non-success AsStatus    */
-  TE9_ERR_TIMEOUT = 6,       /* wait deadline elapsed, request still live */
-  TE9_ERR_EXCEPTION = 7      /* C++ threw; message via te9_last_error()    */
+  TE9_ERR_ENGINE = 5,      /* engine returned a non-success AsStatus    */
+  TE9_ERR_TIMEOUT = 6,     /* wait deadline elapsed, request still live */
+  TE9_ERR_EXCEPTION = 7,   /* C++ threw; message via te9_last_error()    */
+  TE9_ERR_UNSUPPORTED = 8, /* provider cannot supply the requested form */
+  TE9_ERR_NOT_READY = 9,   /* model identity changed or is not startable */
+  TE9_ERR_BUFFER_TOO_SMALL = 10, /* retry with the reported required size */
+  TE9_ERR_CANCELLED = 11         /* cooperative operation cancellation    */
 } te9_status;
+
+#ifdef __cplusplus
+static_assert(sizeof(te9_status) == sizeof(int32_t),
+              "Tempo9 Engine ABI requires 32-bit te9_status");
+#else
+_Static_assert(sizeof(te9_status) == sizeof(int32_t),
+               "Tempo9 Engine ABI requires 32-bit te9_status");
+#endif
+
+/* ── ABI discovery ────────────────────────────────────────────────────── */
+
+/* The encoded ABI version is independent of the DashInfer release version.
+ * Major changes are binary incompatible; a minor release may only append
+ * fields, enum values, capability bits, and optional table entries. */
+#define TE9_API_VERSION_ENCODE(major, minor) \
+  ((((uint32_t)(major)) << 16) | ((uint32_t)(minor) & 0xffffu))
+#define TE9_API_VERSION_MAJOR(version) (((uint32_t)(version)) >> 16)
+#define TE9_API_VERSION_MINOR(version) (((uint32_t)(version)) & 0xffffu)
+#define TE9_ENGINE_API_VERSION TE9_API_VERSION_ENCODE(1u, 4u)
+
+typedef uint64_t te9_engine_capabilities;
+enum {
+  TE9_ENGINE_CAP_NONE = 0,
+  TE9_ENGINE_CAP_MODEL_LLM_SOURCE = UINT64_C(1) << 0,
+  TE9_ENGINE_CAP_CHECKED_REQUEST_START = UINT64_C(1) << 1,
+  TE9_ENGINE_CAP_PROMPT_CACHE_TTL = UINT64_C(1) << 2,
+  /* te9_request_stop may run concurrently with another operation on the same
+   * request. Without this bit, callers must serialize stop as well. */
+  TE9_ENGINE_CAP_CONCURRENT_REQUEST_STOP = UINT64_C(1) << 3,
+  /* The provider can persist and restore the named model's prefix cache. */
+  TE9_ENGINE_CAP_PREFIX_CACHE_TRANSFER = UINT64_C(1) << 4,
+  /* Model build observes a caller-owned cancellation token. */
+  TE9_ENGINE_CAP_CANCELABLE_MODEL_LOAD = UINT64_C(1) << 5
+};
+
+typedef struct te9_engine_s* te9_engine_t;
+typedef struct te9_request_s* te9_request_t;
+typedef uint64_t te9_engine_cancel_token_t;
+struct te9_model_llm_source_s;
+struct te9_checked_request_config_s;
+
+typedef te9_status (*te9_engine_get_model_llm_source_fn)(
+    te9_engine_t engine, const char* model_name,
+    struct te9_model_llm_source_s* source, uint8_t* metadata_blob,
+    size_t capacity, size_t* needed);
+typedef te9_status (*te9_request_start_checked_fn)(
+    te9_engine_t engine, const struct te9_checked_request_config_s* config,
+    te9_request_t* request);
+typedef te9_status (*te9_engine_prefix_cache_transfer_fn)(
+    te9_engine_t engine, const char* model_name, const char* path,
+    uint64_t* node_count);
+typedef te9_status (*te9_engine_cancel_token_create_fn)(
+    te9_engine_cancel_token_t* token);
+typedef te9_status (*te9_engine_cancel_token_cancel_fn)(
+    te9_engine_cancel_token_t token);
+typedef te9_status (*te9_engine_cancel_token_destroy_fn)(
+    te9_engine_cancel_token_t token);
+
+/**
+ * Provider-owned ABI discovery prefix.
+ *
+ * Callers pass the byte size of the table they compiled against. The provider
+ * copies only the prefix it knows and reports its complete size in
+ * `struct_size`; bytes beyond that provider size are left untouched. Callers
+ * must reject a different major and may require capability bits before using
+ * functions introduced after v1.0.
+ */
+typedef struct {
+  size_t struct_size;
+  uint32_t api_version;
+  uint32_t reserved;
+  te9_engine_capabilities capabilities;
+  /* Optional v1.1 entries. Read only when struct_size reaches the field and
+   * the corresponding capability is set. */
+  te9_engine_get_model_llm_source_fn get_model_llm_source;
+  te9_request_start_checked_fn request_start_checked;
+  /* Optional v1.3 entries. A snapshot is opaque and may only be imported for
+   * the same model and a compatible cache layout. */
+  te9_engine_prefix_cache_transfer_fn export_prefix_cache;
+  te9_engine_prefix_cache_transfer_fn import_prefix_cache;
+  /* Optional v1.4 entries. A running build retains an internal state lease
+   * after the public token handle is destroyed. */
+  te9_engine_cancel_token_create_fn cancel_token_create;
+  te9_engine_cancel_token_cancel_fn cancel_token_cancel;
+  te9_engine_cancel_token_destroy_fn cancel_token_destroy;
+} te9_engine_api_table;
+
+uint32_t te9_engine_api_version(void);
+te9_status te9_engine_get_api_table(size_t caller_size,
+                                    te9_engine_api_table* table);
 
 /**
  * Human-readable detail for the calling thread's most recent failure.
  *
  * Thread-local and valid until the next failing call on the same thread, so
- * copy it if you keep it. Returns "" when nothing has failed. The status code
- * is the contract; this string is for logs and bug reports, never for control
- * flow.
+ * copy it if you keep it. Long diagnostics may be truncated. Returns "" when
+ * nothing has failed. The status code is the contract; this string is for logs
+ * and bug reports, never for control flow.
  */
 const char* te9_last_error(void);
 
 /* ── Engine ─────────────────────────────────────────────────────────────── */
 
-typedef struct te9_engine_s* te9_engine_t;
-
 te9_status te9_engine_create(te9_engine_t* out_engine);
-void te9_engine_destroy(te9_engine_t engine);
+/**
+ * Destroy an engine and consume its handle.
+ *
+ * NULL is a successful no-op. The caller must serialize destruction of each
+ * handle. On failure the handle remains live and the owning thread may retry;
+ * only TE9_OK permits the caller to discard the handle.
+ */
+te9_status te9_engine_destroy(te9_engine_t engine);
 
 /**
  * How a model is loaded. Mirrors the fields of AsModelConfig that an on-device
@@ -92,26 +196,130 @@ void te9_engine_destroy(te9_engine_t engine);
  * graph itself (C++ builder, leaf-identical to the Python one on all 16
  * support-matrix models) and caches it under ~/.cache/tempo9 keyed by the
  * gguf's size+mtime.  One file is enough.
+ *
+ * One engine owns one live model. Build returns TE9_ERR_NOT_READY until the
+ * prior model is released; create another engine for concurrent models.
  */
 typedef struct {
   size_t struct_size;
-  const char* model_name;    /* required; names the model for later calls   */
-  const char* graph_path;    /* .asgraph; NULL => engine builds from .gguf  */
-  const char* weights_path;  /* required; .gguf                             */
+  const char* model_name;   /* required; names the model for later calls   */
+  const char* graph_path;   /* .asgraph; NULL => engine builds from .gguf  */
+  const char* weights_path; /* required; .gguf                             */
   /* "CPU:0" / "CUDA:0,1" -- the device index is required, not optional:
    * the engine throws on a unit with no colon. NULL => "CPU:0". */
   const char* compute_unit;
-  int64_t max_length;        /* 0 => engine default                         */
-  int32_t max_batch;         /* 0 => engine default                         */
+  int64_t max_length;          /* 0 => engine default                         */
+  int32_t max_batch;           /* 0 => engine default                         */
   int32_t enable_prefix_cache; /* 0/1                                       */
-  int32_t speculation_k;     /* 0 = off. MTP draft depth.                   */
+  int32_t speculation_k;       /* 0 = off. MTP draft depth.                   */
+  /* Global fallback for prefix nodes without an explicit cache-point TTL.
+   * 0 keeps the engine default (300 seconds). Added in Engine ABI v1.2. */
+  int32_t prefix_cache_ttl_seconds;
+  /* Optional cooperative build/start cancellation. Zero disables it. Added in
+   * Engine ABI v1.4. The provider leases the state for the active load. */
+  te9_engine_cancel_token_t load_cancel_token;
 } te9_model_config;
+
+/* Optional v1.4 functions. Discover them through te9_engine_api_table before
+ * calling so one binary can continue to run against an older v1 provider. */
+te9_status te9_engine_cancel_token_create(te9_engine_cancel_token_t* token);
+te9_status te9_engine_cancel_token_cancel(te9_engine_cancel_token_t token);
+te9_status te9_engine_cancel_token_destroy(te9_engine_cancel_token_t token);
 
 te9_status te9_engine_build_model(te9_engine_t engine,
                                   const te9_model_config* config);
 te9_status te9_engine_start_model(te9_engine_t engine, const char* model_name);
+/* Stops the model and releases any outstanding request handles for it.
+ * The caller must still pass each opaque request object to te9_request_release;
+ * after model stop, all other operations on those request objects are invalid.
+ * Repeating stop for an already-stopped model succeeds. */
 te9_status te9_engine_stop_model(te9_engine_t engine, const char* model_name);
-te9_status te9_engine_release_model(te9_engine_t engine, const char* model_name);
+te9_status te9_engine_release_model(te9_engine_t engine,
+                                    const char* model_name);
+
+/**
+ * Persist or restore the named model's prefix cache.
+ *
+ * `node_count` is required and is set to zero before validation. The provider
+ * replaces exports atomically: readers observe either the old file or a
+ * complete new file, and failures before replacement leave an existing
+ * destination unchanged. Snapshot bytes are opaque; importing into another
+ * model or an incompatible cache layout fails. Import is a startup operation
+ * and requires the model to be stopped. Providers without a portable snapshot
+ * implementation return TE9_ERR_UNSUPPORTED.
+ */
+te9_status te9_engine_export_prefix_cache(te9_engine_t engine,
+                                          const char* model_name,
+                                          const char* path,
+                                          uint64_t* node_count);
+te9_status te9_engine_import_prefix_cache(te9_engine_t engine,
+                                          const char* model_name,
+                                          const char* path,
+                                          uint64_t* node_count);
+
+/* ── LLM model source ─────────────────────────────────────────────────── */
+
+/* Canonical metadata blob v1 is little-endian and has no padding:
+ *
+ *   magic[4] = "T9TM", u32 format_version, u32 record_count,
+ *   u64 total_byte_length,
+ *   repeated { u16 field_id, u8 type, u8 flags, u64 element_count,
+ *              u64 payload_byte_length, payload[payload_byte_length] }
+ *
+ * Field ids are strictly increasing. String-array payloads repeat
+ * { u64 byte_length, raw_bytes } element_count times. Numeric arrays are
+ * tightly packed little-endian scalars. Unknown required fields must fail;
+ * unknown optional fields may be skipped by their checked payload length. */
+#define TE9_LLM_METADATA_FORMAT_V1 1u
+#define TE9_LLM_METADATA_REQUIRED 1u
+
+typedef int32_t te9_llm_metadata_type;
+enum {
+  TE9_LLM_METADATA_I8 = 1,
+  TE9_LLM_METADATA_I32 = 2,
+  TE9_LLM_METADATA_UTF8 = 3,
+  TE9_LLM_METADATA_I32_ARRAY = 4,
+  TE9_LLM_METADATA_F32_ARRAY = 5,
+  TE9_LLM_METADATA_UTF8_ARRAY = 6
+};
+
+typedef int32_t te9_llm_metadata_field;
+enum {
+  TE9_LLM_FIELD_TOKENIZER_MODEL = 1,
+  TE9_LLM_FIELD_TOKENIZER_PRE = 2,
+  TE9_LLM_FIELD_TOKENS = 3,
+  TE9_LLM_FIELD_SCORES = 4,
+  TE9_LLM_FIELD_TOKEN_TYPES = 5,
+  TE9_LLM_FIELD_MERGES = 6,
+  TE9_LLM_FIELD_BOS_TOKEN_ID = 7,
+  TE9_LLM_FIELD_EOS_TOKEN_ID = 8,
+  TE9_LLM_FIELD_UNK_TOKEN_ID = 9,
+  TE9_LLM_FIELD_ADD_BOS = 10,
+  TE9_LLM_FIELD_ADD_EOS = 11,
+  TE9_LLM_FIELD_ADD_SPACE_PREFIX = 12,
+  TE9_LLM_FIELD_CHAT_TEMPLATE = 13
+};
+
+typedef struct te9_model_llm_source_s {
+  size_t struct_size;
+  uint64_t engine_generation;
+  uint64_t model_generation;
+  uint32_t llm_metadata_format_version;
+  uint32_t reserved;
+  uint8_t llm_metadata_sha256[32];
+} te9_model_llm_source;
+
+/* Query size with metadata_blob=NULL/capacity=0, then retry with `needed`
+ * bytes. The source identity is filled on both calls. A model without an
+ * exactly reconstructable embedded tokenizer returns TE9_OK with format 0,
+ * an all-zero digest, and needed=0; its generation identity is still valid
+ * for token-id requests. A short non-null buffer returns
+ * TE9_ERR_BUFFER_TOO_SMALL without changing engine state. */
+te9_status te9_engine_get_model_llm_source(te9_engine_t engine,
+                                           const char* model_name,
+                                           te9_model_llm_source* source,
+                                           uint8_t* metadata_blob,
+                                           size_t capacity, size_t* needed);
 
 /* ── Engine stats ───────────────────────────────────────────────────────── */
 
@@ -124,19 +332,19 @@ te9_status te9_engine_release_model(te9_engine_t engine, const char* model_name)
  * be visible as every field reading zero. */
 typedef struct {
   size_t struct_size;
-  int64_t total_token;      /* KV capacity, in tokens (instantaneous)      */
+  int64_t total_token; /* KV capacity, in tokens (instantaneous)      */
   int64_t free_token;
   int64_t total_span;
   int64_t free_span;
-  int64_t span_size;        /* tokens per span                             */
+  int64_t span_size; /* tokens per span                             */
   int32_t running_request;
   int32_t pending_request;
-  int64_t total_generated_token;  /* cumulative                            */
-  int64_t total_prefill_token;    /* cumulative                            */
+  int64_t total_generated_token; /* cumulative                            */
+  int64_t total_prefill_token;   /* cumulative                            */
   int64_t prefix_cache_hit_token;
   int64_t prefix_cache_miss_token;
-  float prefix_cache_hit_rate;    /* 0..1 over tokens, not requests        */
-  float token_usage_percentage;   /* 0..1                                  */
+  float prefix_cache_hit_rate;  /* 0..1 over tokens, not requests        */
+  float token_usage_percentage; /* 0..1                                  */
 } te9_engine_stats;
 
 /* Fill `out` with the current stats. `out->struct_size` must be set by the
@@ -153,6 +361,13 @@ typedef struct {
  */
 const char* te9_gemm_backend(void);
 
+/** Actual storage observed across successful prefix checkpoint captures.
+ * Returns "none", "fp32", "bf16", "int8", or "mixed". */
+const char* te9_prefix_snapshot_storage(void);
+
+/** Number of successful prefix checkpoint captures observed in this process. */
+uint64_t te9_prefix_snapshot_capture_count(void);
+
 te9_status te9_engine_get_stats(te9_engine_t engine, const char* model_name,
                                 te9_engine_stats* out);
 
@@ -160,14 +375,20 @@ te9_status te9_engine_get_stats(te9_engine_t engine, const char* model_name,
 
 typedef struct {
   size_t struct_size;
-  int64_t max_tokens;   /* NEW tokens, not total; prompt is added on */
+  const int64_t* token_ids;
+  size_t token_count;
+} te9_token_sequence;
+
+typedef struct {
+  size_t struct_size;
+  int64_t max_tokens; /* NEW tokens, not total; prompt is added on */
   float temperature;
   float top_p;
   int32_t top_k;
   float repetition_penalty;
   uint64_t seed;
-  int32_t do_sample;      /* 0/1                                            */
-  int32_t speculation_k;  /* per-request override; 0 = use the model's      */
+  int32_t do_sample;     /* 0/1                                            */
+  int32_t speculation_k; /* per-request override; 0 = use the model's      */
   const int64_t* stop_token_ids;
   size_t stop_token_count;
   /* The end-of-sequence token. NOT optional in practice: GenerateConfig
@@ -184,11 +405,13 @@ typedef struct {
    * reads the tokenizer vocabulary from the model's GGUF on first use. */
   const char* response_format;
   const char* response_schema;
+  /* Complete token sequences. The legacy stop_token_ids field above keeps
+   * its established meaning of one singleton stop per id. */
+  const te9_token_sequence* stop_sequences;
+  size_t stop_sequence_count;
 } te9_generate_config;
 
 /* ── Requests ───────────────────────────────────────────────────────────── */
-
-typedef struct te9_request_s* te9_request_t;
 
 /**
  * Image embeddings produced by the app's own vision tower.
@@ -201,7 +424,8 @@ typedef struct te9_request_s* te9_request_t;
  * not rejected by the model -- the embeddings are spliced into the prompt and
  * the model describes an image nobody encoded. So the implementation checks
  * what it can: `token_count` must equal the number of placeholder tokens in
- * `input_ids`, and `byte_count` must equal token_count * hidden * sizeof(dtype).
+ * `input_ids`, and `byte_count` must equal token_count * hidden *
+ * sizeof(dtype).
  */
 typedef struct te9_image_embeds_s {
   size_t struct_size;
@@ -209,7 +433,7 @@ typedef struct te9_image_embeds_s {
   size_t byte_count;
   int64_t token_count;
   int64_t hidden;
-  int32_t is_float16;   /* 1 = fp16 (what the tower caches), 0 = fp32       */
+  int32_t is_float16; /* 1 = fp16 (what the tower caches), 0 = fp32       */
   /* Replaces the image placeholder tokens in the prefix-cache key, so a
    * second question about the same image reuses its prefill. 0 means the
    * engine derives one, so reuse is never silently lost by omitting it. */
@@ -231,7 +455,7 @@ typedef struct te9_image_embeds_s {
    * one, the expansion is the caller's job (TowerAux.expandImagePlaceholder),
    * and this table is built over the expanded ids. */
   const int32_t* mrope_positions;
-  size_t mrope_position_count;   /* 3 * sequence_length */
+  size_t mrope_position_count; /* 3 * sequence_length */
 
   /* --- appended after mrope_position_count --- */
 
@@ -298,7 +522,36 @@ te9_status te9_request_start(te9_engine_t engine, const char* model_name,
                              const te9_image_embeds* embeds /* nullable */,
                              te9_request_t* out_request);
 
-/** Request lifecycle. `release` frees the handle; `stop` only ends generation. */
+typedef struct te9_prompt_cache_point_s {
+  size_t struct_size;
+  size_t token_offset; /* exclusive prompt-token offset */
+} te9_prompt_cache_point;
+
+typedef struct te9_checked_request_config_s {
+  size_t struct_size;
+  const char* model_name;
+  uint64_t expected_engine_generation;
+  uint64_t expected_model_generation;
+  const int64_t* input_ids;
+  size_t input_id_count;
+  const te9_generate_config* generation;
+  const te9_prompt_cache_point* cache_points;
+  size_t cache_point_count;
+  const te9_image_embeds* embeds;
+  /* Parallel to cache_points. NULL preserves the model-level fallback.
+   * Values are 0 (5-minute default), 300, or 3600. Added in ABI v1.2. */
+  const int32_t* cache_point_ttl_seconds;
+} te9_checked_request_config;
+
+/* Validate model identity and admit the request under one lifecycle lock.
+ * A stale pipeline receives TE9_ERR_NOT_READY and never reaches StartRequest.
+ */
+te9_status te9_request_start_checked(te9_engine_t engine,
+                                     const te9_checked_request_config* config,
+                                     te9_request_t* request);
+
+/** Request lifecycle. `release` frees the handle; `stop` only ends generation.
+ */
 te9_status te9_request_stop(te9_request_t request);
 void te9_request_release(te9_request_t request);
 
@@ -310,13 +563,29 @@ typedef enum {
   TE9_GEN_INTERRUPTED = 2
 } te9_gen_status;
 
+#ifdef __cplusplus
+static_assert(sizeof(te9_gen_status) == sizeof(int32_t),
+              "Tempo9 Engine ABI requires 32-bit te9_gen_status");
+#else
+_Static_assert(sizeof(te9_gen_status) == sizeof(int32_t),
+               "Tempo9 Engine ABI requires 32-bit te9_gen_status");
+#endif
+
 typedef enum {
-  TE9_FINISH_NONE = 0,   /* still running                                  */
+  TE9_FINISH_NONE = 0, /* still running                                  */
   TE9_FINISH_EOS = 1,
   TE9_FINISH_LENGTH = 2,
   TE9_FINISH_STOP = 3,
   TE9_FINISH_INTERRUPTED = 4
 } te9_finish_reason;
+
+#ifdef __cplusplus
+static_assert(sizeof(te9_finish_reason) == sizeof(int32_t),
+              "Tempo9 Engine ABI requires 32-bit te9_finish_reason");
+#else
+_Static_assert(sizeof(te9_finish_reason) == sizeof(int32_t),
+               "Tempo9 Engine ABI requires 32-bit te9_finish_reason");
+#endif
 
 /**
  * Block for up to `timeout_ms` for new tokens, then copy up to `capacity` of
@@ -372,7 +641,7 @@ te9_status te9_request_get_stats(te9_request_t request,
  * of an error. It is also the only tokenizer a GGUF gets on a platform
  * with no HuggingFace repo beside the file.
  *
- * Implemented so far: SentencePiece (tokenizer.ggml.model == "llama").
+ * Implemented so far: SentencePiece ("llama") and Gemma 4 raw-UTF8 BPE.
  * Byte-level BPE ("gpt2") still lives in the host; te9_tokenizer_open
  * fails naming the model string rather than guessing.
  * --------------------------------------------------------------------- */
@@ -412,7 +681,7 @@ const char* te9_tokenizer_chat_template(te9_tokenizer_t tok);
 const char* te9_version(void);
 
 #ifdef __cplusplus
-}  /* extern "C" */
+} /* extern "C" */
 #endif
 
-#endif  /* TEMPO9_ENGINE_H_ */
+#endif /* TEMPO9_ENGINE_H_ */
