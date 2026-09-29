@@ -94,99 +94,99 @@ let testEngine: (deps: [Target.Dependency], link: [LinkerSetting]) =
 let hasASGraphDiff = FileManager.default.fileExists(
     atPath: Context.packageDirectory + "/Sources/asgraphdiff/main.swift")
 
-let package = Package(
-    name: "Tempo9Kit",
-    platforms: [.macOS(.v13), .iOS(.v16)],
-    products: [
-        // ONE public library.  An app developer writes `import Tempo9` and
-        // gets LocalSession -- chat, tool calls, vision, prefix cache.  The
-        // engine binding (Tempo9Engine) and the C shim (CTempo9Engine) are
-        // internal: exporting them would make every symbol below the SDK a
-        // permanent API promise, and nobody outside needs to hold the engine
-        // directly.  ggufctl/vitctl/localctl (and asgraphdiff, where its
-        // source is) are development tools and are not shipped.
-        .library(name: "Tempo9", targets: ["Tempo9"]),
-        // Product name is what users type; the TARGET must differ in more than
-        // case from the "Tempo9" library -- macOS filesystems are
-        // case-insensitive, so a target named "tempo9" collides with it and
-        // the compiler reports it as "statements are not allowed at the top
-        // level" in main.swift, which points nowhere near the cause.
-    ] + (engineStaged
-         ? [.executable(name: "tempo9", targets: ["Tempo9CLI"])]
-         : []),
-    dependencies: [
-        // Only ChatTemplateKit depends on this. Chat templates are real
-        // Jinja -- the Qwen3.5 one is 154 lines using macros, namespace(),
-        // loop variables, tests, filters and raise_exception -- so writing a
-        // "minimal subset" would mean writing an interpreter and then
-        // discovering the next model's template needs the next corner of it.
-        .package(url: "https://github.com/huggingface/swift-jinja.git",
-                 from: "2.0.0"),
-    ],
-    targets: [
-        // Foundation only, deliberately: a host that just needs to read a
-        // model file and tokenize should not pull in a template engine.
-        .target(name: "GGUFKit", path: "GGUFKit/Sources/GGUFKit"),
-        .target(name: "ChatTemplateKit",
-                dependencies: ["GGUFKit",
-                               .product(name: "Jinja", package: "swift-jinja")],
-                path: "GGUFKit/Sources/ChatTemplateKit"),
+// Built in steps with explicit types, not as one expression. The single
+// `Package(...)` this replaced joined four target arrays with `+`, three of
+// them behind ternaries: 5.5 ms to type-check with Xcode 27, and with the
+// Xcode 16.4 on GitHub's macos-15 runners, "unable to type-check this
+// expression in reasonable time" after two minutes. Keep it in statements.
 
-        .executableTarget(name: "ggufctl",
-                          dependencies: ["GGUFKit", "ChatTemplateKit"],
-                          path: "GGUFKit/Sources/ggufctl"),
+// ONE public library.  An app developer writes `import Tempo9` and gets
+// LocalSession -- chat, tool calls, vision, prefix cache.  The engine binding
+// (Tempo9Engine) and the C shim (CTempo9Engine) are internal: exporting them
+// would make every symbol below the SDK a permanent API promise, and nobody
+// outside needs to hold the engine directly.  ggufctl/vitctl/localctl (and
+// asgraphdiff, where its source is) are development tools and are not
+// shipped.
+var products: [Product] = [
+    .library(name: "Tempo9", targets: ["Tempo9"]),
+]
+if engineStaged {
+    // Product name is what users type; the TARGET must differ in more than
+    // case from the "Tempo9" library -- macOS filesystems are
+    // case-insensitive, so a target named "tempo9" collides with it and the
+    // compiler reports it as "statements are not allowed at the top level"
+    // in main.swift, which points nowhere near the cause.
+    products.append(.executable(name: "tempo9", targets: ["Tempo9CLI"]))
+}
 
-        // No Python, numpy or coremltools: the point of the port is that a
-        // host embeds the tower directly.
-        .target(name: "VisionTowerKit", dependencies: ["GGUFKit"],
-                path: "VisionTowerKit/Sources/VisionTowerKit"),
-        .executableTarget(name: "vitctl", dependencies: ["VisionTowerKit"],
-                          path: "VisionTowerKit/Sources/vitctl"),
+let tempo9KitTestDeps: [Target.Dependency] =
+    ["GGUFKit", "Tempo9", "Tempo9Engine"] + testEngine.deps
+let tempo9TestDeps: [Target.Dependency] =
+    ["Tempo9", "Tempo9Engine"] + testEngine.deps
 
-        // CTempo9Engine is a header shim over the engine's C ABI
-        // (include/tempo9_engine.h, kept in step with the engine's copy). The
-        // engine is NOT vendored: it is linked from an engine build staged in
-        // staged-engine/. See README.
-        .systemLibrary(name: "CTempo9Engine",
-                       path: "Tempo9Kit/Sources/CTempo9Engine"),
-        // GGUFKit for the tokenizer protocol the engine-side SentencePiece
-        // tokenizer conforms to. The edge runs this way only -- GGUFKit
-        // knows nothing about the engine -- so there is no cycle.
-        .target(name: "Tempo9Engine", dependencies: ["CTempo9Engine", "GGUFKit"],
-                path: "Tempo9Kit/Sources/Tempo9Engine"),
+var targets: [Target] = [
+    // Foundation only, deliberately: a host that just needs to read a
+    // model file and tokenize should not pull in a template engine.
+    .target(name: "GGUFKit", path: "GGUFKit/Sources/GGUFKit"),
+    .target(name: "ChatTemplateKit",
+            dependencies: ["GGUFKit",
+                           .product(name: "Jinja", package: "swift-jinja")],
+            path: "GGUFKit/Sources/ChatTemplateKit"),
 
-        .target(name: "Tempo9",
-                dependencies: ["GGUFKit", "ChatTemplateKit",
-                               "VisionTowerKit", "Tempo9Engine"],
-                path: "Sources/Tempo9"),
+    .executableTarget(name: "ggufctl",
+                      dependencies: ["GGUFKit", "ChatTemplateKit"],
+                      path: "GGUFKit/Sources/ggufctl"),
 
-        // Tempo9 is where two of the three regressions live, and testing it
-        // without linking would only ever cover GGUFKit.
-        .testTarget(name: "Tempo9KitTests",
-                    dependencies: ["GGUFKit", "Tempo9", "Tempo9Engine"]
-                        + testEngine.deps,
-                    path: "Tests/Tempo9KitTests",
-                    linkerSettings: testEngine.link),
-        .testTarget(name: "GGUFKitTests",
-                    dependencies: ["GGUFKit", "ChatTemplateKit"],
-                    path: "GGUFKit/Tests/GGUFKitTests"),
-        // Pure-Swift splitter logic; needs the C ABI linked because
-        // Tempo9's other files call it. Discovered missing when
-        // HarmonySplitterTests "passed" as 0 tests: this directory had never
-        // been a test target, so ThinkSplitterTests had never run either.
-        .testTarget(name: "Tempo9Tests",
-                    dependencies: ["Tempo9", "Tempo9Engine"] + testEngine.deps,
-                    path: "Tempo9Kit/Tests/Tempo9Tests",
-                    linkerSettings: testEngine.link),
+    // No Python, numpy or coremltools: the point of the port is that a
+    // host embeds the tower directly.
+    .target(name: "VisionTowerKit", dependencies: ["GGUFKit"],
+            path: "VisionTowerKit/Sources/VisionTowerKit"),
+    .executableTarget(name: "vitctl", dependencies: ["VisionTowerKit"],
+                      path: "VisionTowerKit/Sources/vitctl"),
 
-    ] + (!hasASGraphDiff ? [] : [
-        .executableTarget(name: "asgraphdiff", path: "Sources/asgraphdiff"),
-    ]) + (engineStaged ? [] : [
-        // Tests only; no product depends on it. See `testEngine`.
-        .target(name: "CTempo9EngineStub",
-                path: "Tempo9Kit/Sources/CTempo9EngineStub",
-                cSettings: [.headerSearchPath("../CTempo9Engine/include")]),
-    ]) + (!engineStaged ? [] : [
+    // CTempo9Engine is a header shim over the engine's C ABI
+    // (include/tempo9_engine.h, kept in step with the engine's copy). The
+    // engine is NOT vendored: it is linked from an engine build staged in
+    // staged-engine/. See README.
+    .systemLibrary(name: "CTempo9Engine",
+                   path: "Tempo9Kit/Sources/CTempo9Engine"),
+    // GGUFKit for the tokenizer protocol the engine-side SentencePiece
+    // tokenizer conforms to. The edge runs this way only -- GGUFKit
+    // knows nothing about the engine -- so there is no cycle.
+    .target(name: "Tempo9Engine", dependencies: ["CTempo9Engine", "GGUFKit"],
+            path: "Tempo9Kit/Sources/Tempo9Engine"),
+
+    .target(name: "Tempo9",
+            dependencies: ["GGUFKit", "ChatTemplateKit",
+                           "VisionTowerKit", "Tempo9Engine"],
+            path: "Sources/Tempo9"),
+
+    // Tempo9 is where two of the three regressions live, and testing it
+    // without linking would only ever cover GGUFKit.
+    .testTarget(name: "Tempo9KitTests",
+                dependencies: tempo9KitTestDeps,
+                path: "Tests/Tempo9KitTests",
+                linkerSettings: testEngine.link),
+    .testTarget(name: "GGUFKitTests",
+                dependencies: ["GGUFKit", "ChatTemplateKit"],
+                path: "GGUFKit/Tests/GGUFKitTests"),
+    // Pure-Swift splitter logic; needs the C ABI linked because
+    // Tempo9's other files call it. Discovered missing when
+    // HarmonySplitterTests "passed" as 0 tests: this directory had never
+    // been a test target, so ThinkSplitterTests had never run either.
+    .testTarget(name: "Tempo9Tests",
+                dependencies: tempo9TestDeps,
+                path: "Tempo9Kit/Tests/Tempo9Tests",
+                linkerSettings: testEngine.link),
+]
+
+if hasASGraphDiff {
+    targets.append(.executableTarget(name: "asgraphdiff",
+                                     path: "Sources/asgraphdiff"))
+}
+
+if engineStaged {
+    targets += [
         .executableTarget(name: "localctl",
                           dependencies: ["Tempo9", "Tempo9Engine",
                                          "VisionTowerKit"],
@@ -197,5 +197,26 @@ let package = Package(
                                          "VisionTowerKit"],
                           path: "Sources/tempo9-cli",
                           linkerSettings: engineLink),
-    ])
+    ]
+} else {
+    // Tests only; no product depends on it. See `testEngine`.
+    targets.append(.target(name: "CTempo9EngineStub",
+                           path: "Tempo9Kit/Sources/CTempo9EngineStub",
+                           cSettings: [.headerSearchPath("../CTempo9Engine/include")]))
+}
+
+let package = Package(
+    name: "Tempo9Kit",
+    platforms: [.macOS(.v13), .iOS(.v16)],
+    products: products,
+    dependencies: [
+        // Only ChatTemplateKit depends on this. Chat templates are real
+        // Jinja -- the Qwen3.5 one is 154 lines using macros, namespace(),
+        // loop variables, tests, filters and raise_exception -- so writing a
+        // "minimal subset" would mean writing an interpreter and then
+        // discovering the next model's template needs the next corner of it.
+        .package(url: "https://github.com/huggingface/swift-jinja.git",
+                 from: "2.0.0"),
+    ],
+    targets: targets
 )
