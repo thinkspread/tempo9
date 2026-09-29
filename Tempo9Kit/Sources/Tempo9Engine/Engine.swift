@@ -231,6 +231,53 @@ public struct EngineStats: Sendable {
     public var tokenUsage: Float
 }
 
+/// Engines still alive, so the process can stop them before it exits.
+///
+/// The engine's worker threads log through glog. When a process returns from
+/// main -- or an app quits, which calls exit() -- the C++ runtime starts
+/// destroying static objects, glog's among them, while a worker may still be
+/// finishing the last request; the next line it logs aborts the process
+/// (SIGABRT in google::LogMessage::Flush). Whether that happens depends on
+/// the order the statics were initialised in, which the link decides: an app
+/// linking the loose archives exited cleanly 0/5 times out of 5 runs, the
+/// same engine pre-linked into Tempo9Engine.xcframework aborted 5/5
+/// (2026-09-29, Qwen3.5-9B, M5 Pro).
+///
+/// The fix does not depend on that order. The first engine registers an
+/// atexit handler; handlers run in reverse order of registration, so this one
+/// -- registered after every static initialiser has run -- runs before any of
+/// their destructors, and shuts every live engine down exactly as deinit
+/// would. The threads are gone before glog is.
+private final class LiveEngines: @unchecked Sendable {
+    static let shared = LiveEngines()
+    private let lock = NSLock()
+    private var engines: [ObjectIdentifier: WeakEngine] = [:]
+    private var hookRegistered = false
+    private struct WeakEngine { weak var engine: Engine? }
+
+    func add(_ engine: Engine) {
+        lock.lock(); defer { lock.unlock() }
+        engines[ObjectIdentifier(engine)] = WeakEngine(engine: engine)
+        if !hookRegistered {
+            hookRegistered = true
+            atexit { LiveEngines.shared.shutdownAll() }
+        }
+    }
+
+    func remove(_ engine: Engine) {
+        lock.lock(); defer { lock.unlock() }
+        engines[ObjectIdentifier(engine)] = nil
+    }
+
+    func shutdownAll() {
+        lock.lock()
+        let live = engines.values.compactMap(\.engine)
+        engines.removeAll()
+        lock.unlock()
+        for engine in live { engine.shutdown() }
+    }
+}
+
 public final class Engine: @unchecked Sendable {
     private let handle: te9_engine_t
     private let modelName: String
@@ -343,6 +390,7 @@ public final class Engine: @unchecked Sendable {
         }
         self.handle = engine
         self.modelName = modelName
+        LiveEngines.shared.add(self)
 
         // Every string has to outlive the call, so the withCString nest is
         // load-bearing rather than style.
@@ -388,14 +436,29 @@ public final class Engine: @unchecked Sendable {
     /// that crashed the E4B refusal.
     private var started = false
 
-    deinit {
+    /// deinit and the exit hook can both reach shutdown(); it runs once.
+    private let teardownLock = NSLock()
+    private var tornDown = false
+
+    /// Stops the model (only if it was started) and destroys the engine.
+    /// Called by deinit, and by LiveEngines' exit hook for an engine still
+    /// alive when the process exits.
+    fileprivate func shutdown() {
+        teardownLock.lock(); defer { teardownLock.unlock() }
+        if tornDown { return }
+        tornDown = true
         if started {
             modelName.withCString {
                 _ = te9_engine_stop_model(handle, $0)
                 _ = te9_engine_release_model(handle, $0)
             }
         }
-        te9_engine_destroy(handle)
+        _ = te9_engine_destroy(handle)
+    }
+
+    deinit {
+        LiveEngines.shared.remove(self)
+        shutdown()
     }
 
     /// A snapshot of the engine's counters. Cheap: it copies a struct the

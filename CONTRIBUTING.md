@@ -12,7 +12,7 @@ This repository is the Swift SDK (`import Tempo9`), the `tempo9` server CLI,
 their tools, the manual and the examples, licensed Apache-2.0.
 
 The inference engine is not here. It ships as a binary under its own licence
-(see [NOTICE](NOTICE)), and changes to it cannot be taken through this
+([ENGINE-LICENSE](ENGINE-LICENSE)), and changes to it cannot be taken through this
 repository. If you hit an engine bug, open an issue with the model file, the
 request and what came back; a reproduction through the CLI or the SDK is the
 most useful form it can take.

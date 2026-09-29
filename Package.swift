@@ -86,8 +86,52 @@ let engineLink: [LinkerSetting] = [
 /// LINK; that left a fresh clone, and CI, running the ten GGUFKit tests and
 /// nothing else. A test that does reach the engine now fails, loudly, rather
 /// than passing against a fake.
+
+/// The engine as a release ships it: packaging/make_xcframework.sh turns the
+/// staged archives into staged-engine/Tempo9Engine.xcframework -- one
+/// pre-linked object exporting only te9_*, plus a module map naming the system
+/// frameworks it needs. When it is there it wins over the loose archives, and
+/// the targets that link an engine are declared the way an outside app sees
+/// them: a binary target, and no unsafe flags.
+let engineXCFramework = FileManager.default.fileExists(
+    atPath: staticDir + "/Tempo9Engine.xcframework/Info.plist")
+
+/// The published engine: Tempo9Engine.xcframework.zip on a GitHub release,
+/// and SwiftPM's checksum of it (packaging/release.sh prints both). Empty
+/// until the first release. When set, a checkout with no engine staged --
+/// every outside developer's -- downloads it and links it like any binary
+/// target; a staged engine still wins, so maintainers test what they build.
+let releaseEngineURL =
+    "https://github.com/thinkspread/tempo9/releases/download/v1.0.0/Tempo9Engine.xcframework.zip"
+let releaseEngineChecksum =
+    "6d8e98932499ab4494fa29e2d4a529281bae5428eb25c6eccdb68f4e30e6eb1a"
+let engineRelease = !engineXCFramework && !engineStaged && !releaseEngineURL.isEmpty
+
+let engineAvailable = engineXCFramework || engineStaged || engineRelease
+/// What an engine-linking target adds to its link: the flags above for loose
+/// archives; nothing for an xcframework, local or downloaded (its module map
+/// does it).
+let engineLinkSettings: [LinkerSetting] =
+    engineStaged && !engineXCFramework ? engineLink : []
+
 let testEngine: (deps: [Target.Dependency], link: [LinkerSetting]) =
-    engineStaged ? ([], engineLink) : (["CTempo9EngineStub"], [])
+    engineAvailable ? ([], engineLinkSettings) : (["CTempo9EngineStub"], [])
+
+/// The C ABI's module: the xcframework when there is one, otherwise a header
+/// shim (include/tempo9_engine.h, kept in step with the engine's copy) whose
+/// engine comes from the staged archives -- or, with neither, from the test
+/// stub.
+let engineModule: Target
+if engineXCFramework {
+    engineModule = .binaryTarget(name: "CTempo9Engine",
+                                 path: "staged-engine/Tempo9Engine.xcframework")
+} else if engineRelease {
+    engineModule = .binaryTarget(name: "CTempo9Engine", url: releaseEngineURL,
+                                 checksum: releaseEngineChecksum)
+} else {
+    engineModule = .systemLibrary(name: "CTempo9Engine",
+                                  path: "Tempo9Kit/Sources/CTempo9Engine")
+}
 
 /// Maintainer tools are declared only where their source is, so a tree that
 /// does not carry one never names a directory it does not have.
@@ -110,7 +154,7 @@ let hasASGraphDiff = FileManager.default.fileExists(
 var products: [Product] = [
     .library(name: "Tempo9", targets: ["Tempo9"]),
 ]
-if engineStaged {
+if engineAvailable {
     // Product name is what users type; the TARGET must differ in more than
     // case from the "Tempo9" library -- macOS filesystems are
     // case-insensitive, so a target named "tempo9" collides with it and the
@@ -144,12 +188,8 @@ var targets: [Target] = [
     .executableTarget(name: "vitctl", dependencies: ["VisionTowerKit"],
                       path: "VisionTowerKit/Sources/vitctl"),
 
-    // CTempo9Engine is a header shim over the engine's C ABI
-    // (include/tempo9_engine.h, kept in step with the engine's copy). The
-    // engine is NOT vendored: it is linked from an engine build staged in
-    // staged-engine/. See README.
-    .systemLibrary(name: "CTempo9Engine",
-                   path: "Tempo9Kit/Sources/CTempo9Engine"),
+    // The engine's C ABI; see `engineModule`. The engine is NOT vendored.
+    engineModule,
     // GGUFKit for the tokenizer protocol the engine-side SentencePiece
     // tokenizer conforms to. The edge runs this way only -- GGUFKit
     // knows nothing about the engine -- so there is no cycle.
@@ -185,18 +225,18 @@ if hasASGraphDiff {
                                      path: "Sources/asgraphdiff"))
 }
 
-if engineStaged {
+if engineAvailable {
     targets += [
         .executableTarget(name: "localctl",
                           dependencies: ["Tempo9", "Tempo9Engine",
                                          "VisionTowerKit"],
                           path: "Sources/localctl",
-                          linkerSettings: engineLink),
+                          linkerSettings: engineLinkSettings),
         .executableTarget(name: "Tempo9CLI",
                           dependencies: ["Tempo9", "Tempo9Engine",
                                          "VisionTowerKit"],
                           path: "Sources/tempo9-cli",
-                          linkerSettings: engineLink),
+                          linkerSettings: engineLinkSettings),
     ]
 } else {
     // Tests only; no product depends on it. See `testEngine`.

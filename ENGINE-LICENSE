@@ -1,0 +1,131 @@
+                          TEMPO9 ENGINE LICENSE
+                         Version 0.1 -- 2026-09-29
+
+Copyright (c) 2024-2026 Jiejing Zhang. All rights reserved.
+
+This License governs the Tempo9 inference engine in binary form. The
+source code in the Tempo9 repository (the Swift SDK, the tempo9 command-line
+program's own code, tools, documentation and examples) is licensed
+separately under the Apache License, Version 2.0 (see LICENSE). Open-source
+components included in the engine remain under their own licences (see
+NOTICE and LICENSES/), and nothing in this License limits the rights those
+licences give You in those components.
+
+
+1. DEFINITIONS
+
+"Licensor" means Jiejing Zhang.
+
+"Engine" means the Tempo9 inference engine in object-code form as the
+Licensor distributes it -- the library in Tempo9Engine.xcframework and the
+engine linked into the tempo9 command-line program -- including the Metal
+kernels embedded in it and any update the Licensor distributes under this
+License.
+
+"You" means the individual or Legal Entity exercising rights under this
+License.
+
+"Legal Entity" means the union of an entity and every entity that
+controls, is controlled by, or is under common control with it. "Control"
+means ownership of more than fifty percent (50%) of the outstanding shares
+or equity, or the power to direct the management of the entity by contract
+or otherwise.
+
+"Qualifying Organization" means a Legal Entity that, taken as a whole,
+(a) has fewer than 100 employees, and (b) had less than US$1,000,000 in
+gross revenue in its most recently completed fiscal year.
+
+"Application" means software You develop that uses the Engine and provides
+material functionality beyond the Engine itself.
+
+
+2. FREE LICENSE
+
+2.1 Grant. If You are an individual acting on Your own behalf, or a
+Qualifying Organization, the Licensor grants You a worldwide,
+non-exclusive, non-transferable, royalty-free licence, for any purpose
+including commercial purposes, to:
+
+  (a) use and run the Engine;
+  (b) incorporate the Engine, unmodified, into Your Applications; and
+  (c) distribute the Engine, unmodified, as part of Your Applications,
+      including through application stores, and as part of the tempo9
+      program as distributed by the Licensor.
+
+2.2 Conditions. When You distribute the Engine You must (a) include this
+License and the NOTICE file, or a prominent reference to where they can be
+read, and (b) keep every copyright, licence and attribution notice in the
+Engine intact. The recipients of Your Application may use the Engine only
+as part of it.
+
+2.3 Individuals working for others. An individual using the Engine in the
+course of work for a Legal Entity that is not a Qualifying Organization is
+not eligible under Section 2.1 for that use.
+
+
+3. COMMERCIAL LICENSE
+
+If You are not eligible under Section 2, You need a separate commercial
+licence from the Licensor to use or distribute the Engine. Contact:
+jiejing@thinkspread.com.
+
+
+4. RESTRICTIONS
+
+You may not:
+
+  (a) modify, adapt or translate the Engine, or create derivative works of
+      it, except as the licences of its open-source components allow for
+      those components;
+  (b) reverse engineer, decompile or disassemble the Engine, except to the
+      extent that applicable law expressly permits it notwithstanding this
+      limitation;
+  (c) distribute the Engine on its own -- as a standalone library, SDK or
+      runtime -- rather than as part of an Application or of the tempo9
+      program;
+  (d) remove, alter or obscure any notice in the Engine; or
+  (e) use the Engine to build a product whose primary purpose is to
+      compete with the Engine as an inference engine for others to build
+      on.
+
+
+5. TRADEMARKS
+
+This License grants no right to use the names "Tempo9" or "ThinkSpread",
+or any logo of the Licensor, except to state truthfully that an
+Application uses the Engine.
+
+
+6. TERMINATION
+
+Your rights under this License end automatically if You breach it. If You
+cure the breach within thirty (30) days of becoming aware of it, Your
+rights are reinstated. When Your rights end, You must stop using and
+distributing the Engine. Copies of Your Application already distributed to
+end users before termination may continue to be used by them.
+
+
+7. UPDATES AND LICENSE VERSIONS
+
+Each release of the Engine is governed by the version of this License
+distributed with it. The Licensor may publish new versions of this License;
+they apply only to releases distributed with them.
+
+
+8. DISCLAIMER OF WARRANTY
+
+THE ENGINE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING WITHOUT LIMITATION ANY WARRANTY OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE OR NON-INFRINGEMENT. THE ENTIRE
+RISK AS TO THE QUALITY AND PERFORMANCE OF THE ENGINE, AND OF ANY OUTPUT IT
+PRODUCES, IS WITH YOU.
+
+
+9. LIMITATION OF LIABILITY
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT WILL THE LICENSOR BE
+LIABLE TO YOU FOR ANY DIRECT, INDIRECT, SPECIAL, INCIDENTAL, CONSEQUENTIAL
+OR EXEMPLARY DAMAGES, INCLUDING LOSS OF DATA, PROFITS OR GOODWILL, ARISING
+OUT OF OR RELATED TO THIS LICENSE OR THE ENGINE, HOWEVER CAUSED AND UNDER
+ANY THEORY OF LIABILITY, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGES.

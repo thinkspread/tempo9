@@ -70,28 +70,35 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
-      # A runner has no engine, so the manifest must not offer `tempo9` or
-      # `localctl` here. If it does, someone made the linking targets
-      # unconditional again and the next step's failure would be confusing.
-      # asgraphdiff is declared only where its source is (Package.swift).
-      - name: The manifest offers only engine-free products
+      # The products follow the engine. With none (no release published yet,
+      # nothing staged on a runner) the manifest must not offer `tempo9` or
+      # `localctl`: if it does, someone made the linking targets unconditional
+      # again. With the published engine -- a binary target in Package.swift --
+      # it must offer them, and they must link. asgraphdiff is declared only
+      # where its source is.
+      - name: The manifest offers the products its engine allows
         run: |
-          got=$(swift package describe --type json | python3 -c \
-            'import json,sys; print(" ".join(sorted(p["name"] for p in json.load(sys.stdin)["products"])))')
+          swift package describe --type json > describe.json
+          engine=$(python3 -c 'import json; print(next(t["type"] for t in json.load(open("describe.json"))["targets"] if t["name"] == "CTempo9Engine"))')
+          got=$(python3 -c 'import json; print(" ".join(sorted(p["name"] for p in json.load(open("describe.json"))["products"])))')
           want="Tempo9 ggufctl vitctl"
-          [ -f Sources/asgraphdiff/main.swift ] && want="Tempo9 asgraphdiff ggufctl vitctl"
+          [ "$engine" = binary ] && want="Tempo9 ggufctl localctl tempo9 vitctl"
+          [ -f Sources/asgraphdiff/main.swift ] && want=$(echo $want asgraphdiff | tr ' ' '\n' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
           [ "$got" = "$want" ] || {
-            echo "::error::products without an engine: got [$got], want [$want]"; exit 1; }
-          echo "  $got"
+            echo "::error::engine is $engine; products: got [$got], want [$want]"; exit 1; }
+          echo "  engine: $engine; products: $got"
 
-      # The executables are the only targets that LINK, so they are what
-      # proves the no-engine claim above rather than merely asserting it.
-      - name: The tools link without an engine build
+      # The executables are the targets that LINK, so they are what proves the
+      # claim above rather than merely asserting it.
+      - name: The tools link
         run: |
+          bin=$(swift build -c release --show-bin-path)
           tools="ggufctl vitctl"
           [ -f Sources/asgraphdiff/main.swift ] && tools="$tools asgraphdiff"
+          engine=$(python3 -c 'import json; print(next(t["type"] for t in json.load(open("describe.json"))["targets"] if t["name"] == "CTempo9Engine"))')
+          [ "$engine" = binary ] && tools="$tools tempo9 localctl"
           for t in $tools; do
-            test -x ".build/release/$t" || { echo "::error::$t did not link"; exit 1; }
+            test -x "$bin/$t" || { echo "::error::$t did not link"; exit 1; }
             echo "  $t linked"
           done
 

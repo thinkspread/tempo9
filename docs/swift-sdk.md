@@ -41,12 +41,14 @@ Foundation and nothing else.
 ## Use it
 
 ```swift
-.package(url: "https://github.com/thinkspread/tempo9", branch: "main")
+.package(url: "https://github.com/thinkspread/tempo9", from: "1.0.0")
 ```
 
-(Pin a version once the first release is tagged; that release also carries
-the engine an app links. Until then this compiles, and linking an app
-fails for want of the engine.)
+SwiftPM downloads the engine, `Tempo9Engine.xcframework`, from the GitHub
+release. Declare `platforms: [.macOS("26.0")]` in the app's package: an
+executable declared for an older macOS gets the engine's Metal backend
+switched off (the comment on `platforms` in this repository's
+Package.swift has the measurement).
 
 then take the product:
 

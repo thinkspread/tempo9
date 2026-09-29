@@ -14,7 +14,8 @@ into. Section 0 describes this source itself.
 Licensing note. The source in this repository is licensed under the Apache
 License, Version 2.0 (see LICENSE). The engine is not part of that grant: it
 is not in this repository, and it is distributed only as a binary, under the
-licence that accompanies that binary. Sections 1 and 2 are the attribution
+Tempo9 Engine License (ENGINE-LICENSE), which accompanies it. Sections 1 and 2
+are the attribution
 that binary owes to the open-source work inside it.
 
 ZeroMQ is the clearest case of the distinction: the engine repository

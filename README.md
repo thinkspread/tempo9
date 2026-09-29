@@ -14,11 +14,8 @@ Code, Codex CLI and anything OpenAI-compatible can point at it directly.
 
 ## Install
 
-> **Not yet.** These three need a published release carrying a signed
-> binary, and the first one is not out. Until it is, the Swift package below
-> compiles and its tests run, but an app cannot link the engine. Run the
-> installer anyway and it says so — "no published release for
-> thinkspread/tempo9 yet" — rather than failing in a way you have to decode.
+Apple Silicon and macOS 26 or later. Any of these installs the signed,
+notarized `tempo9` binary:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thinkspread/tempo9/main/install.sh | bash
@@ -72,11 +69,12 @@ Two ways, and they are different products rather than two flavours of one:
   localhost, one copy of the weights. See [docs/swift-sdk.md](docs/swift-sdk.md).
 
 ```swift
-.package(url: "https://github.com/thinkspread/tempo9", branch: "main")
+.package(url: "https://github.com/thinkspread/tempo9", from: "1.0.0")
 ```
 
-Pin a version once the first release is tagged; that release also carries
-the engine an app links.
+SwiftPM downloads the engine (`Tempo9Engine.xcframework`) from the release;
+an app declares `platforms: [.macOS("26.0")]` (see
+[docs/swift-sdk.md](docs/swift-sdk.md) for why).
 
 Application-level guidance for both — streaming, tool calling, guided
 decoding, agent loops, multimodal — is collected as skills in
@@ -109,7 +107,10 @@ the manual and the examples — is licensed under the **Apache License 2.0**;
 see [LICENSE](LICENSE).
 
 The engine is not in this repository and is not covered by that licence. It
-is distributed only as a binary, under the licence that ships with it.
+is distributed only as a binary, under the Tempo9 Engine License
+([ENGINE-LICENSE](ENGINE-LICENSE)): free for individuals and for
+organisations with fewer than 100 employees and under US$1M in annual
+revenue; above that, a commercial licence is required.
 
 [NOTICE](NOTICE) carries the attribution this project owes: what the source
 here derives from (ports from DashInfer/AllSpark, HuggingFace transformers,
