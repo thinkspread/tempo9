@@ -79,8 +79,8 @@ Pin a version once the first release is tagged; that release also carries
 the engine an app links.
 
 Application-level guidance for both — streaming, tool calling, guided
-decoding, agent loops, multimodal — is collected as skills in a companion
-repository, tempo9-skills, which is not public yet.
+decoding, agent loops, multimodal — is collected as skills in
+[thinkspread/tempo9-skills](https://github.com/thinkspread/tempo9-skills).
 
 ## Notes
 
