@@ -213,9 +213,11 @@ let package = Package(
     // (metal_tensor, MetalPerformancePrimitives) by that sdk field. Declared
     // as .v13, the engine's tensor-API probe fails with "use of undeclared
     // identifier 'mpp'", the whole Metal backend turns itself off, and the
-    // tempo9 CLI serves on the CPU without saying so: Qwen3.5-9B Q4_K_S
-    // decoded 26 tok/s that way against 83 on Metal (M5 Pro, 2026-09-29).
-    // The engine's Metal path needs macOS 26 anyway.
+    // tempo9 CLI serves on the CPU without saying so. With Qwen3.5-9B
+    // Q4_K_S on an M5 Pro (2026-09-29, three runs of each): a 1,004-token
+    // prefill took 14.1-14.5 s that way against 0.79-0.85 s on Metal, and
+    // decode ran at 23 tok/s against 52. The engine's Metal path needs
+    // macOS 26 anyway.
     platforms: [.macOS("26.0"), .iOS(.v16)],
     products: products,
     dependencies: [
