@@ -461,7 +461,7 @@ public final class OpenAIServer: @unchecked Sendable {
                     sendSSE(conn, chunk(id: String(id), created: created,
                                         delta: ["role": "assistant"],
                                         finish: nil))
-                    let filter = ToolCallBridge.StreamFilter()
+                    let filter = ToolCallBridge.StreamFilter(tools: tmplTools)
                     // Incremental tool_calls: announce a call the moment its
                     // name is certain, send its arguments the moment its
                     // closer arrives.  Clients CONCATENATE argument deltas,
@@ -770,7 +770,7 @@ public final class OpenAIServer: @unchecked Sendable {
                         "content_index": 0,
                         "part": ["type": "output_text", "text": "",
                                  "annotations": []]])
-                    let filter = ToolCallBridge.StreamFilter()
+                    let filter = ToolCallBridge.StreamFilter(tools: tmplTools)
                     // Incremental function_call items: the canonical ladder
                     // (added empty/in_progress -> arguments.delta ->
                     // arguments.done -> item done), unchanged in shape --
@@ -1001,7 +1001,7 @@ public final class OpenAIServer: @unchecked Sendable {
                 out.event("content_block_start", [
                     "type": "content_block_start", "index": 0,
                     "content_block": ["type": "text", "text": ""]])
-                let filter = ToolCallBridge.StreamFilter()
+                let filter = ToolCallBridge.StreamFilter(tools: tmplTools)
                 // Incremental tool_use blocks: same ladder, earlier in
                 // time.  The text block (index 0) closes the moment the
                 // first call opens -- once the filter is suppressing, no
@@ -1278,7 +1278,7 @@ public final class OpenAIServer: @unchecked Sendable {
             if r.stream {
                 out.ndjsonHead()
                 started = true
-                let filter = ToolCallBridge.StreamFilter()
+                let filter = ToolCallBridge.StreamFilter(tools: tmplTools)
                 let reply = try await run(turn) { d in
                     let text = filter.feed(d.content)
                     if !text.isEmpty {

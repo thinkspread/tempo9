@@ -98,8 +98,20 @@ enum ToolCallBridge {
 
     /// Split a finished reply into visible text and tool calls, typing the
     /// arguments against the tool schema the request supplied.
+    ///
+    /// A request that declared NO tools gets no tool calls: the reply is
+    /// text, exactly as the model wrote it.  That is what every OpenAI-
+    /// compatible server does, and the reason it matters is agent traffic
+    /// replayed without its tool list (SiliconBench's agent split: BFCL /
+    /// Hermes conversations whose history already contains <tool_call>s).
+    /// Parsing anyway answered 30 of 100 of those with finish_reason
+    /// "tool_calls" and an EMPTY content -- a client that sent no tools
+    /// cannot act on a call, and a benchmark counts it as a 0-token reply.
     static func parse(_ text: String, tools: [[String: Any]])
         -> (text: String, calls: [Call]) {
+        guard !tools.isEmpty else {
+            return (text.trimmingCharacters(in: .whitespacesAndNewlines), [])
+        }
         let types = argTypes(tools)
         let xml = ToolCallParser.parse(text)
         guard !xml.isEmpty else { return parse(text) }
@@ -240,6 +252,12 @@ enum ToolCallBridge {
     }
 
     final class StreamFilter {
+        /// No tools declared: nothing is a tool call, so nothing is held
+        /// back (see parse(_:tools:)).  The argument is required on purpose
+        /// -- every call site has to say which kind of request it serves.
+        private let passThrough: Bool
+        init(tools: [[String: Any]]) { passThrough = tools.isEmpty }
+
         private var pending = ""
         private var suppressing = false
         /// Everything from the first call marker onward.  The old filter
@@ -255,6 +273,7 @@ enum ToolCallBridge {
         private static let tags = ["<tool_call>", "<function="]
 
         func feed(_ delta: String) -> String {
+            if passThrough { return delta }
             if suppressing { callBuf += delta; return "" }
             pending += delta
             for tag in Self.tags {
