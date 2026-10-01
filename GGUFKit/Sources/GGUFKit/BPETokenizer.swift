@@ -251,6 +251,10 @@ public final class BPETokenizer {
     private var idOf: [String: Int] = [:]
     private var mergeRank: [Pair: Int] = [:]
     private var specials: [(text: String, id: Int)] = []
+    /// The same specials as UTF-8, bucketed by their first byte and longest
+    /// first within a bucket -- what encodeSegments actually scans with.
+    private var specialsByFirstByte: [[(bytes: [UInt8], id: Int)]] =
+        Array(repeating: [], count: 256)
     private let regex: NSRegularExpression
     private let byteEncoder: [UInt8: Character]
     private let byteDecoder: [Character: UInt8]
@@ -342,6 +346,14 @@ public final class BPETokenizer {
         }
         // Longest first, so <|im_start|> wins over any shorter prefix.
         specials.sort { $0.text.count > $1.text.count }
+        for special in specials {
+            let bytes = Array(special.text.utf8)
+            guard let first = bytes.first else { continue }
+            specialsByFirstByte[Int(first)].append((bytes, special.id))
+        }
+        for b in 0..<256 {
+            specialsByFirstByte[b].sort { $0.bytes.count > $1.bytes.count }
+        }
 
         if dialect == .gemma4 {
             // Byte-fallback tokens, by their literal "<0xNN>" spelling.
@@ -383,43 +395,61 @@ public final class BPETokenizer {
 
     /// Split on special tokens, BPE everything between them.
     ///
-    /// Iterative, and it has to be. This recursed on the remainder after each
-    /// special token, so the stack grew once per MARKER in the text -- fine
-    /// for a chat turn, fatal for an agent framework's prompt, where 34 tool
-    /// schemas render into a template carrying markers by the hundred. Every
-    /// frame also held a fresh String copy of the rest, and re-scanned it
-    /// with every special, making the whole thing quadratic on top.
+    /// One left-to-right pass over the UTF-8 bytes. At each byte that some
+    /// special starts with, the candidates sharing that first byte are tried
+    /// longest first; the first position with a match is the earliest special
+    /// and the longest one there wins -- the same choice the old loop made.
     ///
-    /// It died as SIGBUS on the cooperative thread pool -- whose stacks are a
-    /// fraction of the main thread's -- inside `range(of:)`, which is where
-    /// the guard page happened to be touched rather than the cause. Two turns
-    /// of a real agent session were enough; curl never came close.
+    /// The old loop asked Foundation's `range(of:)` for EVERY special after
+    /// EVERY match, each call scanning the rest of the text (to the end, when
+    /// that special was absent) with grapheme-aware comparison. On a
+    /// SiliconBench agent prompt (4.3k tokens, hundreds of markers) that was
+    /// 95% of encode and ~55 ms per request -- more than the prefill of a
+    /// short prompt. It replaced a recursive version that overflowed the
+    /// cooperative thread pool's stack on agent prompts; this one keeps the
+    /// fix (no recursion, no per-match copy of the remainder).
     ///
-    /// The left part needs no recursion either: `hit` is the EARLIEST match,
-    /// so by construction nothing before it is special.
+    /// Bytes, not Characters, is also what HF does: a special matches its
+    /// literal text even when a combining mark follows it, where a grapheme
+    /// comparison would have refused. A first byte can only be a UTF-8 lead
+    /// or ASCII byte, so a match never starts inside a multi-byte character.
     private func encodeSegments(_ text: String, into out: inout [Int]) {
-        var rest = Substring(text)
-        while !rest.isEmpty {
-            var earliest: (range: Range<Substring.Index>, id: Int)?
-            if !specials.isEmpty {
-                for special in specials {
-                    guard let found = rest.range(of: special.text) else { continue }
-                    if earliest == nil || found.lowerBound < earliest!.range.lowerBound {
-                        earliest = (found, special.id)
+        let utf8 = Array(text.utf8)
+        let n = utf8.count
+        var segmentStart = 0
+        var i = 0
+        func flush(_ end: Int) {
+            if end > segmentStart {
+                encodePlain(String(decoding: utf8[segmentStart..<end],
+                                   as: UTF8.self), into: &out)
+            }
+        }
+        utf8.withUnsafeBufferPointer { buf in
+            while i < n {
+                let candidates = specialsByFirstByte[Int(buf[i])]
+                var matched: (length: Int, id: Int)?
+                if !candidates.isEmpty {
+                    for c in candidates where c.bytes.count <= n - i {
+                        var equal = true
+                        var k = 1
+                        while k < c.bytes.count {
+                            if buf[i + k] != c.bytes[k] { equal = false; break }
+                            k += 1
+                        }
+                        if equal { matched = (c.bytes.count, c.id); break }
                     }
                 }
+                if let m = matched {
+                    flush(i)
+                    out.append(m.id)
+                    i += m.length
+                    segmentStart = i
+                } else {
+                    i += 1
+                }
             }
-            guard let hit = earliest else {
-                encodePlain(String(rest), into: &out)
-                return
-            }
-            if hit.range.lowerBound > rest.startIndex {
-                encodePlain(String(rest[rest.startIndex..<hit.range.lowerBound]),
-                            into: &out)
-            }
-            out.append(hit.id)
-            rest = rest[hit.range.upperBound...]
         }
+        flush(n)
     }
 
     private func encodePlain(_ text: String, into out: inout [Int]) {
