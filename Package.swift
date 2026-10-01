@@ -99,14 +99,15 @@ let engineXCFramework = FileManager.default.fileExists(
 /// The published engine: Tempo9Engine.xcframework.zip on a GitHub release,
 /// and SwiftPM's checksum of it (packaging/release.sh prints both). Empty
 /// until the first release. A release that does not change the engine keeps
-/// pointing at the one that did: 1.1.0 changed only the Swift products, so
-/// its engine is still the 1.0.0 asset. When set, a checkout with no engine staged --
+/// pointing at the one that did: 1.1.0 changed only the Swift products and
+/// kept the 1.0.0 asset; 1.1.1 ships a new engine (BF16 load and concurrent
+/// decode fixes) and points at its own. When set, a checkout with no engine staged --
 /// every outside developer's -- downloads it and links it like any binary
 /// target; a staged engine still wins, so maintainers test what they build.
 let releaseEngineURL =
-    "https://github.com/thinkspread/tempo9/releases/download/v1.0.0/Tempo9Engine.xcframework.zip"
+    "https://github.com/thinkspread/tempo9/releases/download/v1.1.1/Tempo9Engine.xcframework.zip"
 let releaseEngineChecksum =
-    "6d8e98932499ab4494fa29e2d4a529281bae5428eb25c6eccdb68f4e30e6eb1a"
+    "c7a654c031b91792009eea4ecdda6ce078fd2a5f6c7a3fc1eaf66b7760d2a407"
 let engineRelease = !engineXCFramework && !engineStaged && !releaseEngineURL.isEmpty
 
 let engineAvailable = engineXCFramework || engineStaged || engineRelease

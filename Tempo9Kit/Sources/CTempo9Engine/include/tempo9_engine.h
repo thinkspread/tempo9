@@ -90,7 +90,7 @@ _Static_assert(sizeof(te9_status) == sizeof(int32_t),
   ((((uint32_t)(major)) << 16) | ((uint32_t)(minor) & 0xffffu))
 #define TE9_API_VERSION_MAJOR(version) (((uint32_t)(version)) >> 16)
 #define TE9_API_VERSION_MINOR(version) (((uint32_t)(version)) & 0xffffu)
-#define TE9_ENGINE_API_VERSION TE9_API_VERSION_ENCODE(1u, 4u)
+#define TE9_ENGINE_API_VERSION TE9_API_VERSION_ENCODE(1u, 5u)
 
 typedef uint64_t te9_engine_capabilities;
 enum {
@@ -360,6 +360,25 @@ typedef struct {
  * Never NULL. Valid for the life of the process.
  */
 const char* te9_gemm_backend(void);
+
+/**
+ * Why `te9_gemm_backend()` says "cpu": one line, the same text the engine
+ * logged to stderr when it decided. The cases so far: no Metal device; the
+ * device is not in the tensor-API allowlist (M5/M6/A19/A20); the Metal 4
+ * tensor-API probe kernel failed to compile — typically the HOST binary is
+ * linked against a pre-macOS-26 SDK (its LC_BUILD_VERSION sdk field) and
+ * the runtime compiler hides the Metal 4 headers from it; the kernel library
+ * failed to compile; AS_METAL_KERNEL_DIR points somewhere unreadable; or
+ * AS_GEMM_BACKEND is set to something other than "metal".
+ *
+ * Empty while the backend is "metal". On a build without Metal support it
+ * names that. Hosts should print it next to the backend at startup: the CPU
+ * fallback is a 10x cliff that has otherwise looked like nothing happening.
+ *
+ * Added in API 1.5 (plain symbol, like te9_gemm_backend; not in the api
+ * table). Never NULL. Valid for the life of the process.
+ */
+const char* te9_gemm_backend_reason(void);
 
 /** Actual storage observed across successful prefix checkpoint captures.
  * Returns "none", "fp32", "bf16", "int8", or "mixed". */
