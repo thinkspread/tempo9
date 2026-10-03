@@ -219,13 +219,17 @@ public final class BPETokenizer {
     public private(set) var addBOS: Bool = false
     /// Every token that ends a generation, not just the .gguf's `eos`.
     ///
-    /// The .gguf carries ONE eos id, and for Gemma 4 it is `<eos>`(1) — a
-    /// pretraining marker the chat template never emits. A turn ends with
-    /// `<turn|>`(106), and a tool call pauses at `<|tool_response>`(50);
-    /// generation_config.json lists all three, and generation_config.json is
-    /// exactly the file a GGUF-only host does not have. Stopping on the
-    /// declared eos alone means never stopping: the model finishes its
-    /// answer, opens a new turn and answers again, forever.
+    /// The .gguf carries ONE eos id. For Gemma 4 that may be `<eos>`(1) — a
+    /// pretraining marker the chat template never emits — or `<turn|>`(106)
+    /// (gemma-4-E4B-it-Q8_0 declares 106). A turn ends with `<turn|>`, a
+    /// tool call pauses at `<|tool_response>`(50), and the model can still
+    /// emit `<eos>` -- after a tool call it does, repeatedly: with 106 as
+    /// the declared eos, `<eos>` was in no stop list and a declared-tools
+    /// reply ran on as `<tool_call|><eos><eos>...` into the content.
+    /// generation_config.json lists all three ids, and it is exactly the
+    /// file a GGUF-only host does not have. Stopping on the declared eos
+    /// alone means never stopping: the model finishes its answer, opens a
+    /// new turn and answers again, forever.
     ///
     /// Resolved by NAME from the vocabulary, so a model without them is
     /// unaffected and nothing is hard-coded to an id that another build of
@@ -376,7 +380,7 @@ public final class BPETokenizer {
         // nothing to add — listing it anyway would be harmless but would
         // suggest the .gguf could not be trusted, and here it can.
         case .gpt2: return []
-        case .gemma4: return ["<turn|>", "<|tool_response>"]
+        case .gemma4: return ["<turn|>", "<|tool_response>", "<eos>"]
         // </s> is the file's own eos and is already listed.
         case .spm: return []
         }

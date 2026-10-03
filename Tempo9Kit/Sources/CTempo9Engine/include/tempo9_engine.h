@@ -83,14 +83,33 @@ _Static_assert(sizeof(te9_status) == sizeof(int32_t),
 
 /* ── ABI discovery ────────────────────────────────────────────────────── */
 
-/* The encoded ABI version is independent of the DashInfer release version.
- * Major changes are binary incompatible; a minor release may only append
- * fields, enum values, capability bits, and optional table entries. */
+/* From 3.0 the encoded ABI version follows the engine release: an engine
+ * 3.0.0-rc3 reports ABI 3.0 (the pre-release suffix has no slot here; read it
+ * from te9_version()).  Up to 1.5 the ABI was numbered on its own, and 3.0 is
+ * that same ABI renumbered -- binary compatible with 1.1 through 1.5.
+ *
+ * Compatibility is therefore NOT "same major".  It is what it always was in
+ * practice: struct_size on every versioned struct (a caller passes the size it
+ * was compiled with; the provider fills that prefix) and the capability bits in
+ * te9_engine_api_table.  Check a capability before calling the entry point it
+ * guards.  A minor release may only append fields, enum values, capability
+ * bits, and optional table entries. */
 #define TE9_API_VERSION_ENCODE(major, minor) \
   ((((uint32_t)(major)) << 16) | ((uint32_t)(minor) & 0xffffu))
 #define TE9_API_VERSION_MAJOR(version) (((uint32_t)(version)) >> 16)
 #define TE9_API_VERSION_MINOR(version) (((uint32_t)(version)) & 0xffffu)
-#define TE9_ENGINE_API_VERSION TE9_API_VERSION_ENCODE(1u, 5u)
+#define TE9_ENGINE_API_VERSION TE9_API_VERSION_ENCODE(3u, 0u)
+/* 1.x and 3.x are one ABI family: 3.0 is 1.5 renumbered.  RANK puts both on
+ * one scale (1.0 -> 0 ... 1.5 -> 5, 3.0 -> 5, 3.1 -> 6, ...) so "is this
+ * provider at least what I was built for" stays a single comparison; a major
+ * outside the family (2, 4, ...) is not comparable at all. */
+#define TE9_API_VERSION_IN_FAMILY(version)      \
+  (TE9_API_VERSION_MAJOR(version) == 1u ||       \
+   TE9_API_VERSION_MAJOR(version) == 3u)
+#define TE9_API_VERSION_RANK(version)                          \
+  (TE9_API_VERSION_MAJOR(version) == 3u                         \
+       ? 5u + TE9_API_VERSION_MINOR(version)                    \
+       : TE9_API_VERSION_MINOR(version))
 
 typedef uint64_t te9_engine_capabilities;
 enum {

@@ -122,9 +122,10 @@ public struct ChatTemplate {
     /// survive the whole way through.
     public func render(contextJSON: String) throws -> String {
         let parsed = try OrderedJSON.parse(contextJSON)
-        guard case .object(let fields) = parsed else {
+        guard case .object(let parsedFields) = parsed else {
             throw ChatTemplateError.render("context must be a JSON object")
         }
+        let fields = Self.decodeToolCallArguments(parsedFields)
 
         do {
             return try renderParsed(fields)
@@ -143,6 +144,47 @@ public struct ChatTemplate {
             }
             return try renderParsed(folded)
         }
+    }
+
+    /// OpenAI sends a past call's `function.arguments` as a JSON STRING; chat
+    /// templates iterate it as a mapping (Qwen3.5: `tool_call.arguments|items`,
+    /// emitting one `<parameter=...>` per key). transformers raises on a
+    /// string there and vLLM decodes it first; swift-jinja yields nothing, so
+    /// every historical call was rendered with its arguments silently gone --
+    /// up to 1,825 of 4,590 tokens on a SiliconBench agent prompt, and the
+    /// model no longer saw what it had run. Decode it, as vLLM does, when the
+    /// string is a JSON object; anything else is left exactly as sent.
+    /// The key order inside the string is kept (OrderedJSON), since a
+    /// template that re-serializes it with `tojson` puts it in the prompt.
+    static func decodeToolCallArguments(
+        _ fields: OrderedDictionary<ObjectKey, Value>
+    ) -> OrderedDictionary<ObjectKey, Value> {
+        guard case .array(let msgs)? = fields[.string("messages")] else {
+            return fields
+        }
+        var changed = false
+        let decoded: [Value] = msgs.map { msg in
+            guard case .object(var m) = msg,
+                  case .array(let calls)? = m[.string("tool_calls")] else {
+                return msg
+            }
+            m[.string("tool_calls")] = .array(calls.map { call in
+                guard case .object(var c) = call,
+                      case .object(var fn)? = c[.string("function")],
+                      case .string(let raw)? = fn[.string("arguments")],
+                      let obj = try? OrderedJSON.parse(raw),
+                      case .object = obj else { return call }
+                fn[.string("arguments")] = obj
+                c[.string("function")] = .object(fn)
+                changed = true
+                return .object(c)
+            })
+            return .object(m)
+        }
+        guard changed else { return fields }
+        var out = fields
+        out[.string("messages")] = .array(decoded)
+        return out
     }
 
     /// system + first user -> one user message. Returns nil when there is

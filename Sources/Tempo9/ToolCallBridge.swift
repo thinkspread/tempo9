@@ -107,6 +107,26 @@ enum ToolCallBridge {
     /// Parsing anyway answered 30 of 100 of those with finish_reason
     /// "tool_calls" and an EMPTY content -- a client that sent no tools
     /// cannot act on a call, and a benchmark counts it as a 0-token reply.
+    /// Where a call starts, in every dialect ToolCallParser reads: Qwen's
+    /// wrapper and bare function tag, and Gemma 4's `<|tool_call>`.  ONE
+    /// list for the visible-text cut and the stream filter both: the parser
+    /// learned Gemma while these two places still knew only Qwen, so a
+    /// declared-tools Gemma reply came back with the call in tool_calls AND
+    /// its raw `<|tool_call>call:...<tool_call|>` text in content, streamed
+    /// or not.
+    static let callMarkers = ["<tool_call>", "<function=", "<|tool_call>"]
+
+    /// Visible text = everything before the first call marker of any dialect.
+    static func textBeforeCalls(_ text: String) -> String {
+        var clean = text
+        for marker in callMarkers {
+            if let r = clean.range(of: marker) {
+                clean = String(clean[..<r.lowerBound])
+            }
+        }
+        return clean.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func parse(_ text: String, tools: [[String: Any]])
         -> (text: String, calls: [Call]) {
         guard !tools.isEmpty else {
@@ -122,11 +142,7 @@ enum ToolCallBridge {
             return Call(name: c.name,
                         argumentsJSON: String(data: data, encoding: .utf8) ?? "{}")
         }
-        var clean = text
-        for marker in ["<tool_call>", "<function="] {
-            if let r = clean.range(of: marker) { clean = String(clean[..<r.lowerBound]) }
-        }
-        return (clean.trimmingCharacters(in: .whitespacesAndNewlines), calls)
+        return (textBeforeCalls(text), calls)
     }
 
     /// Split a finished reply into visible text and tool calls.
@@ -146,15 +162,7 @@ enum ToolCallBridge {
                             argumentsJSON: String(data: data,
                                 encoding: .utf8) ?? "{}")
             }
-            // Visible text = everything before the first call marker.
-            var clean = text
-            for marker in ["<tool_call>", "<function="] {
-                if let r = clean.range(of: marker) {
-                    clean = String(clean[..<r.lowerBound])
-                }
-            }
-            return (clean.trimmingCharacters(in: .whitespacesAndNewlines),
-                    calls)
+            return (textBeforeCalls(text), calls)
         }
         return parseJSONForm(text)
     }
@@ -268,9 +276,10 @@ enum ToolCallBridge {
         /// written.
         private var callBuf = ""
         private var announced = 0
-        /// Both call markers: the wrapper tag AND the bare function tag —
-        /// the wrapper is optional in what the model actually emits.
-        private static let tags = ["<tool_call>", "<function="]
+        /// Every dialect's call markers (ToolCallBridge.callMarkers): Qwen's
+        /// wrapper AND bare function tag -- the wrapper is optional in what
+        /// the model actually emits -- and Gemma 4's `<|tool_call>`.
+        private static let tags = ToolCallBridge.callMarkers
 
         func feed(_ delta: String) -> String {
             if passThrough { return delta }
@@ -343,6 +352,20 @@ enum ToolCallBridge {
             var out: [String] = []
             var i = s.startIndex
             while i < s.endIndex {
+                // Gemma 4: <|tool_call>call:NAME{  -- the name is certain
+                // once its `{` has arrived.
+                if let r = s.range(of: "<|tool_call>", range: i..<s.endIndex) {
+                    var n = r.upperBound
+                    if s[n...].hasPrefix("call:") {
+                        n = s.index(n, offsetBy: 5)
+                    }
+                    guard let brace = s.range(of: "{", range: n..<s.endIndex)
+                    else { break }          // name still arriving
+                    out.append(String(s[n..<brace.lowerBound])
+                        .trimmingCharacters(in: .whitespacesAndNewlines))
+                    i = brace.upperBound
+                    continue
+                }
                 if let r = s.range(of: "<function=", range: i..<s.endIndex) {
                     guard let end = s.range(of: ">",
                                             range: r.upperBound..<s.endIndex)
