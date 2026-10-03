@@ -45,7 +45,7 @@ Foundation and nothing else.
 ## Use it
 
 ```swift
-.package(url: "https://github.com/thinkspread/tempo9", from: "1.1.0")
+.package(url: "https://github.com/thinkspread/tempo9", from: "1.1.2")
 ```
 
 SwiftPM downloads the engine, `Tempo9Engine.xcframework`, from the GitHub
@@ -75,10 +75,10 @@ try server.start()
 Those five lines are what `tempo9` does; see `Sources/tempo9-cli/main.swift`
 for the rest of it, which is argument parsing.
 
-`Tempo9` is the only library product. The internal targets named above are
-not exported, so `.product(name: "GGUFKit", ...)` does not resolve — that
-example was here until 2026-08-31 and never worked after the products were
-collapsed.
+Those three are the library products since 1.1.0; in 1.0.0 `Tempo9` was the
+only one, so a package pinned below 1.1.0 cannot take `GGUFKit` or
+`VisionTowerKit`. `ChatTemplateKit` and `Tempo9Engine` stay internal:
+`.product(name: "ChatTemplateKit", ...)` does not resolve.
 
 To run a server instead of linking one, see [`manual/`](../manual/); for
 five working requests spanning the OpenAI, Anthropic and Ollama

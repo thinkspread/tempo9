@@ -70,7 +70,7 @@ Two ways, and they are different products rather than two flavours of one:
   localhost, one copy of the weights. See [docs/swift-sdk.md](docs/swift-sdk.md).
 
 ```swift
-.package(url: "https://github.com/thinkspread/tempo9", from: "1.1.0")
+.package(url: "https://github.com/thinkspread/tempo9", from: "1.1.2")
 ```
 
 SwiftPM downloads the engine (`Tempo9Engine.xcframework`) from the release;
