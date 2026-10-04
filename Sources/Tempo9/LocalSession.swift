@@ -121,6 +121,8 @@ public struct PreparedTurn {
     let splitter: StreamSplitter
     let opensThink: Bool
     let started: Date
+    /// Anthropic cache_control breakpoints resolved to prompt-token offsets.
+    let cachePoints: [PromptCachePoint]
     /// Prompt tokens exactly as the engine will see them (media woven in).
     public var promptTokens: Int { ids.count }
     /// The max_tokens the engine will run with (see `LocalReply.maxTokens`).
@@ -656,7 +658,8 @@ public final class LocalSession {
                         images: ImageEmbeddings? = nil,
                         image: ImagePlacement? = nil,
                         audio: AudioPlacement? = nil,
-                        tools: [[String: Any]]? = nil) async throws
+                        tools: [[String: Any]]? = nil,
+                        cacheBreakpoints: [CacheBreakpoint] = []) async throws
         -> PreparedTurn {
         // The gate protects the HOST-side prep — template render, the
         // incremental-tokenization cache (tokCache is shared mutable
@@ -742,6 +745,13 @@ public final class LocalSession {
             try? buf.write(to: dir.appendingPathComponent("i-\(stamp).i64"))
         }
 #endif
+        // Before weaving: media expands placeholder ids, which would move
+        // every offset after it (and the Anthropic path refuses media).
+        let cachePoints = (image == nil && audio == nil && !cacheBreakpoints.isEmpty)
+            ? resolveCachePoints(cacheBreakpoints, messages: messages,
+                                 tools: tools, enableThinking: enableThinking,
+                                 prompt: prompt, ids: ids)
+            : []
         var embeds = images
         if image != nil || audio != nil {
             let woven = try weave(ids: ids, encoding: image, audio: audio)
@@ -864,6 +874,7 @@ public final class LocalSession {
         return PreparedTurn(ids: ids, config: cfg, embeds: embeds,
                             decoder: decoder, splitter: splitter,
                             opensThink: opensThink, started: started,
+                            cachePoints: cachePoints,
                             warnings: warnings)
     }
 
@@ -891,7 +902,8 @@ public final class LocalSession {
 
         var finalReason: FinishReason = .none
         for try await chunk in engine.generate(
-            inputIDs: ids.map(Int64.init), config: cfg, images: embeds) {
+            inputIDs: ids.map(Int64.init), config: cfg, images: embeds,
+            cachePoints: turn.cachePoints) {
             generated += chunk.tokenIDs.count
             let text = decoder.feed(chunk.tokenIDs.map(Int.init))
             if !text.isEmpty {
@@ -967,6 +979,234 @@ public final class LocalSession {
                         seconds: Date().timeIntervalSince(started),
                         engine: engineStats,
                         maxTokens: cfg.maxTokens)
+    }
+
+    // MARK: - cache_control -> engine cache points
+
+    /// Byte length of each token's decoded text, by id.  Vocabulary-level
+    /// and immutable, so it only grows; guarded by the turn gate like
+    /// tokCache.
+    private var tokenByteLength: [Int: Int] = [:]
+
+    /// Resolve Anthropic breakpoints to prompt-token offsets.
+    ///
+    /// Every point is found by RENDERING the prefix it closes and checking
+    /// that the render is a byte-prefix of the real prompt -- the template
+    /// is the only thing that knows where a message ends, and a breakpoint
+    /// placed past a byte the next request may change would pin a node no
+    /// one can ever hit.  A breakpoint that cannot be placed exactly is
+    /// dropped, never guessed: these are hints, and a request must never
+    /// fail or slow down over one.
+    func resolveCachePoints(_ breakpoints: [CacheBreakpoint],
+                            messages: [[String: Any]],
+                            tools: [[String: Any]]?,
+                            enableThinking: Bool,
+                            prompt: String, ids: [Int]) -> [PromptCachePoint] {
+        let t0 = Date()
+        let promptBytes = Array(prompt.utf8)
+        func render(_ msgs: [[String: Any]],
+                    _ t: [[String: Any]]?) -> [UInt8]? {
+            var e: [String: Any] = ["enable_thinking": enableThinking]
+            if let t, !t.isEmpty { e["tools"] = t }
+            return (try? template.render(messages: msgs,
+                                         addGenerationPrompt: false,
+                                         extra: e)).map { Array($0.utf8) }
+        }
+        var points: [PromptCachePoint] = []
+        var notes: [String] = []
+        for bp in breakpoints {
+            switch bp {
+            case let .tools(ttl):
+                // Where does the tool list END?  Render the head once as is
+                // and once with one more tool appended: the renders agree
+                // exactly up to the slot a new tool would occupy.  That is
+                // the boundary a client's tool list moves at -- Claude
+                // Code's MCP connectors land there when they finish
+                // connecting after the first request -- and it needs no
+                // knowledge of how this template spells a tool block.
+                // The head is the first message plus a probe user turn:
+                // Qwen3.5's template refuses a conversation with no user
+                // query, and the probe sits after the tools either way.
+                let head = Array(messages.prefix(1)) + [Self.probeUser(1)]
+                guard let tools, let last = tools.last, !messages.isEmpty,
+                      let a = render(head, tools),
+                      let b = render(head,
+                                     tools + [Self.probeTool(like: last)])
+                else { notes.append("tools: no render"); continue }
+                let n = min(Self.commonPrefix(a, b),
+                            Self.commonPrefix(a, promptBytes))
+                guard n > 0 else { notes.append("tools: empty"); continue }
+                let endTok = tokenOffset(atByte: n, in: ids)
+                points.append(PromptCachePoint(tokenOffset: endTok,
+                                               ttlSeconds: ttl))
+                notes.append("tools@\(n)B")
+                // The end pin covers tools APPENDED.  A tool that appears or
+                // disappears inside the list moves the prompt earlier --
+                // Claude Code carries a transient WaitForMcpServers in its
+                // first request while connectors are still connecting, 24th
+                // of 29 tools, ~2.2k tokens before the end, and only the
+                // engine's 4096-token ladder caught it (1280 tokens short).
+                // So also pin the tool boundaries ~1k/2k/4k/8k tokens before
+                // the end: log-spaced by DISTANCE, not "the last N tools",
+                // because where a transient tool sorts decides its index
+                // and nothing decides its distance.  Each rung is placed by
+                // estimate (JSON size) and located exactly by one render
+                // with only the first k tools, which agrees with the prompt
+                // up to where tool k begins.
+                if Self.toolLadderEnabled, tools.count > 1, endTok > 0 {
+                    let bytesPerToken = Double(n) / Double(endTok)
+                    let sizes = tools.map {
+                        Double(((try? JSONSerialization.data(
+                            withJSONObject: $0))?.count ?? 0) + 1)
+                    }
+                    for k in Self.toolLadderRungs(
+                        sizes: sizes, bytesPerToken: bytesPerToken,
+                        distances: Self.toolLadderDistances) {
+                        guard let r = render(head, Array(tools.prefix(k)))
+                        else { continue }
+                        let m = Self.commonPrefix(r, promptBytes)
+                        guard m > 0, m < n else { continue }
+                        points.append(PromptCachePoint(
+                            tokenOffset: tokenOffset(atByte: m, in: ids),
+                            ttlSeconds: ttl))
+                        notes.append("tool\(k)@\(m)B")
+                    }
+                }
+            case let .message(k, ttl):
+                guard k >= 0, k < messages.count else {
+                    notes.append("msg\(k): out of range"); continue
+                }
+                let prefix = Array(messages[0...k])
+                let end: Int
+                if let a = render(prefix, tools) {
+                    // A template may render a message differently once it
+                    // is no longer the last one (Qwen3's reasoning on past
+                    // assistant turns); then the prefix is not the
+                    // prompt's, and no offset is honest.
+                    guard Self.commonPrefix(a, promptBytes) == a.count else {
+                        notes.append("msg\(k): not a prefix"); continue
+                    }
+                    end = a.count
+                } else if let a = render(prefix + [Self.probeUser(1)], tools),
+                          let b = render(prefix + [Self.probeUser(2)], tools) {
+                    // The prefix alone does not render (a system message
+                    // with no user query).  Follow it with two different
+                    // user turns: the renders agree up to the start of
+                    // that turn's CONTENT, which is past the next turn's
+                    // header but before anything the client wrote.
+                    let n = Self.commonPrefix(a, b)
+                    guard Self.commonPrefix(a, promptBytes) >= n else {
+                        notes.append("msg\(k): not a prefix"); continue
+                    }
+                    end = n
+                } else {
+                    notes.append("msg\(k): no render"); continue
+                }
+                points.append(PromptCachePoint(
+                    tokenOffset: tokenOffset(atByte: end, in: ids),
+                    ttlSeconds: ttl))
+                notes.append("msg\(k)@\(end)B")
+            }
+        }
+        if ProcessInfo.processInfo.environment["TEMPO9_CACHE_POINT_DEBUG"] == "1" {
+            var line = String(format: "[cache-points] %.1f ms, %d ids:",
+                              Date().timeIntervalSince(t0) * 1e3, ids.count)
+            for (note, p) in zip(notes.filter { $0.contains("@") }, points) {
+                let lo = max(0, p.tokenOffset - 3), hi = min(ids.count, p.tokenOffset + 3)
+                let before = String(decoding: tokenizer.decodeBytes(
+                    Array(ids[lo..<p.tokenOffset]), skipSpecialTokens: false,
+                    preserving: []), as: UTF8.self)
+                let after = String(decoding: tokenizer.decodeBytes(
+                    Array(ids[p.tokenOffset..<hi]), skipSpecialTokens: false,
+                    preserving: []), as: UTF8.self)
+                line += " \(note)->tok \(p.tokenOffset) ttl \(p.ttlSeconds) "
+                    + "[\(before.debugDescription)|\(after.debugDescription)]"
+            }
+            for n in notes where !n.contains("@") { line += " (" + n + ")" }
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
+        return points
+    }
+
+    /// The number of leading tokens whose decoded bytes fit in `limit`
+    /// bytes of the prompt.  `ids` IS the prompt's tokenization, so its
+    /// decoded bytes are the prompt's bytes; a token straddling the limit
+    /// is excluded, which keeps the point at or before the boundary.
+    private func tokenOffset(atByte limit: Int, in ids: [Int]) -> Int {
+        var bytes = 0
+        for (i, id) in ids.enumerated() {
+            let len: Int
+            if let l = tokenByteLength[id] {
+                len = l
+            } else {
+                len = tokenizer.decodeBytes([id], skipSpecialTokens: false,
+                                            preserving: []).count
+                tokenByteLength[id] = len
+            }
+            if bytes + len > limit { return i }
+            bytes += len
+        }
+        return ids.count
+    }
+
+    static func commonPrefix(_ a: [UInt8], _ b: [UInt8]) -> Int {
+        let n = min(a.count, b.count)
+        var i = 0
+        while i < n, a[i] == b[i] { i += 1 }
+        return i
+    }
+
+    /// TEMPO9_TOOL_LADDER=0 pins only the end of the tool list.
+    ///
+    /// ON for the worst case, at a measured cost in the common one
+    /// (Qwen3.5-9B, M5 Pro, interleaved arms x2, turn-2 prefill):
+    ///   WaitForMcpServers race (2.2k from the end)  22.15 -> 20.59 s
+    ///   transient tool ~6k from the end             32.12 -> 28.55 s
+    ///   tools only appended (no mid-list change)    +0.36 s per session
+    ///     (four more snapshots captured on turns 1 and 2; nothing after)
+    /// plus ~20 ms of host rendering per request and 4 x 25 MB pinned
+    /// for the breakpoint's TTL.
+    static let toolLadderEnabled =
+        ProcessInfo.processInfo.environment["TEMPO9_TOOL_LADDER"] != "0"
+    /// How far before the end of the tool list (in tokens) the extra tool
+    /// boundary pins go.  A change x tokens before the end resumes from the
+    /// first rung at or beyond x: at most one rung gap (< x + one tool)
+    /// short, for x up to 8k; four snapshots.
+    static let toolLadderDistances = [1024, 2048, 4096, 8192]
+
+    /// For each distance (tokens before the end of the tool list), the
+    /// index k of the tool whose leading boundary is the first one at or
+    /// beyond that distance, by estimated rendered size.  Sorted, deduped;
+    /// a distance longer than the whole list (past tool 1) gets no rung.
+    static func toolLadderRungs(sizes: [Double], bytesPerToken: Double,
+                                distances: [Int]) -> [Int] {
+        var rungs = Set<Int>()
+        for distance in distances {
+            let want = Double(distance) * bytesPerToken
+            var k = sizes.count, tail = 0.0
+            while k > 1 && tail < want { k -= 1; tail += sizes[k] }
+            if tail >= want { rungs.insert(k) }
+        }
+        return rungs.sorted()
+    }
+
+    /// A user turn that exists only to make a prefix renderable; two probes
+    /// with different text locate where user content begins.
+    static func probeUser(_ n: Int) -> [String: Any] {
+        ["role": "user", "content": n == 1 ? "\u{1}" : "\u{2}"]
+    }
+
+    /// A copy of `tool` under another name: same shape, so the template
+    /// renders it the way it renders any tool.
+    static func probeTool(like tool: [String: Any]) -> [String: Any] {
+        var probe = tool
+        if var f = tool["function"] as? [String: Any] {
+            f["name"] = "tempo9_cache_probe"
+            probe["function"] = f
+        } else {
+            probe["name"] = "tempo9_cache_probe"
+        }
+        return probe
     }
 
     /// Byte offset of the last occurrence of `needle`, found iteratively.

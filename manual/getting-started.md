@@ -3,8 +3,12 @@
 ## Run a model
 
 ```
-tempo9 --gguf ~/models/qwen3-8b-q4ks.gguf
+tempo9 --hf unsloth/Qwen3.5-9B-GGUF:Q4_K_S
 ```
+
+The first run downloads the 5.4 GB file into the Hugging Face cache, and
+later runs start from that copy. A GGUF you already have works the same way:
+`tempo9 --gguf ~/models/qwen3-8b-q4ks.gguf`.
 
 That is the whole setup. There is no configuration file, no daemon to
 install, and no model conversion step — Tempo9 loads GGUF directly.

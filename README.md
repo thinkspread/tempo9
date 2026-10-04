@@ -5,12 +5,35 @@ KV cache, GGUF direct load, GPU + Neural Engine execution — one binary, one
 command:
 
 ```bash
-tempo9 --gguf your-model.gguf --port 11435
+brew install thinkspread/tap/tempo9
+tempo9 --hf unsloth/Qwen3.5-9B-GGUF:Q4_K_S
 ```
+
+`--hf owner/repo[:quant]` downloads a GGUF into the standard Hugging Face
+cache, where a copy that huggingface_hub or llama.cpp already pulled is
+reused instead of downloaded again. Any local file works too:
+`tempo9 --gguf your-model.gguf`. So does a model that Ollama already
+pulled: `tempo9 --ollama qwen3:8b`.
 
 That serves OpenAI (`/v1/chat/completions`), Anthropic (`/v1/messages`),
 and OpenAI Responses (`/v1/responses`) APIs on localhost — Cursor, Claude
 Code, Codex CLI and anything OpenAI-compatible can point at it directly.
+Claude Code, for example:
+
+```bash
+tempo9 --hf unsloth/Qwen3.5-9B-GGUF:Q4_K_S --max-length 65536
+ANTHROPIC_BASE_URL=http://127.0.0.1:11435 ANTHROPIC_API_KEY=local claude
+```
+
+Claude Code's system prompt alone is about 32k tokens, so give it the
+larger context. Its first request on a fresh server prefills about 40k
+tokens: roughly 50 s with Qwen3.5-9B and 25 s with Gemma-4-E4B on an
+M5 Pro. After that the prefix cache carries it, so each tool-call turn
+prefills in under 1.5 s, and a later Qwen session on the same server
+took 10-23 s for a whole question. Qwen3.5-9B is the more reliable
+choice for multi-step work; Gemma-4-E4B is faster.
+[manual/claude-code.md](manual/claude-code.md#what-to-expect-time-per-question-and-which-model)
+has the measurements.
 
 ## Install
 
@@ -32,22 +55,32 @@ or grab the tarball from [Releases](https://github.com/thinkspread/tempo9/releas
 ## Why
 
 Tempo9 is built for several agents at once, not one person typing, and it
-is measured that way. Numbers from the 2026-08-30 benchmark write-up: Apple
-M5 Pro, 24 GB, default macOS settings; llama.cpp b10307 built from source
-(Metal + BLAS); both engines reading the same Qwen3.5-35B-A3B q3km GGUF.
-Paired figures are two runs.
+is measured that way. [The 2026-10 benchmark](docs/benchmark-2026-10-m5pro.md)
+used the SiliconBench pipeline on an Apple M5 Pro with 24 GB and default
+macOS settings, and compared 7 models on four engines:
 
-- **2.8× aggregate decode throughput at 8 concurrent streams**
-  (105.5 / 105.2 vs 38.1 / 32.2 tok/s) — continuous batching, not queueing
-- **128K declared context at flat memory** (547–557 MB vs 3,625–3,657 MB,
-  where llama.cpp ran out of memory in both runs) — paged KV allocates for
-  what you use, not the worst case
-- **27% lower energy per token** at 8 concurrent streams (0.268 vs 0.368
-  J/token, one sampling window)
-- **1.14–1.20× single-stream decode** (68.2 / 71.9 vs 60.0 / 60.1 tok/s)
+- **At 16 concurrent requests, 1.4–2× the throughput of omlx and
+  llama.cpp**, and the first token arrives 6–24× sooner, on Qwen3.5
+  0.8B–9B and Gemma-4-E4B. The one exception is Qwen3.5-0.8B agent
+  against omlx, where the lead is 1.07×.
+- **Ahead of vllm-metal on every Qwen3.5 throughput cell** (+4…+33 %),
+  and at parity on Gemma-4-E4B.
+- **Qwen3.5-35B-A3B on 24 GB.** vllm-metal and omlx (MLX 4-bit) run out of
+  GPU memory. On the same GGUF as llama.cpp, Tempo9 is 15–59 % faster,
+  with a 1.6 s median first token at 16 concurrent chats against 18 s.
+- **Quality on par.** On the Qwen3.5 and Gemma models, GMRID F1 is
+  within run-to-run noise of the other engines.
 
-Where it does not win: one stream's prefill is 0.90× llama.cpp's, and a
-single stream at 7K context is 0.64× end to end.
+Where it does not win: under heavy concurrency vllm-metal's first token
+still comes sooner (Qwen3.5-9B agent at 16 concurrent: 7.5 s vs 5.4 s),
+and a single stream is close everywhere. omlx is faster on the
+smallest models (Qwen3.5-0.8B chat: 211 vs 177 tok/s).
+
+Earlier, against llama.cpp only (2026-08-30, Qwen3.5-35B-A3B q3km):
+**128K declared context at flat memory**, 547–557 MB against 3,625–3,657 MB,
+where llama.cpp ran out of memory. Paged KV allocates for what you use,
+not for the worst case. Energy per token was **27 % lower** at 8
+concurrent streams (0.268 vs 0.368 J/token, one sampling window).
 
 ## Models
 

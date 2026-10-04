@@ -103,13 +103,15 @@ let engineXCFramework = FileManager.default.fileExists(
 /// kept the 1.0.0 asset; 1.1.1 ships a new engine (BF16 load and concurrent
 /// decode fixes) and points at its own; 1.1.2 ships engine 3.0.0-rc3 (Metal
 /// tensor units back on, Gemma 4 fast prefill and prefix cache) and points at
-/// its own. When set, a checkout with no engine staged --
+/// its own; 1.1.3 ships an engine whose prefix cache keeps hybrid-model
+/// snapshots a client's changed tool list can resume from, and points at its
+/// own. When set, a checkout with no engine staged --
 /// every outside developer's -- downloads it and links it like any binary
 /// target; a staged engine still wins, so maintainers test what they build.
 let releaseEngineURL =
-    "https://github.com/thinkspread/tempo9/releases/download/v1.1.2/Tempo9Engine.xcframework.zip"
+    "https://github.com/thinkspread/tempo9/releases/download/v1.1.3/Tempo9Engine.xcframework.zip"
 let releaseEngineChecksum =
-    "25b74b3a8a42bb8c7e37692f5aaa13e13ab7f5a08f236d5bcfdd341cae0b2e64"
+    "19c8d1d20a028f35ea1bf668d40085504aa2967659c768299944d2f2aa3240bc"
 let engineRelease = !engineXCFramework && !engineStaged && !releaseEngineURL.isEmpty
 
 let engineAvailable = engineXCFramework || engineStaged || engineRelease

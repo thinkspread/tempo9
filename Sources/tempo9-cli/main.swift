@@ -77,12 +77,111 @@ if let ref = arg("ollama") {
     }
 }
 
+// A GGUF from Hugging Face, fetched into Hugging Face's own cache (see
+// HuggingFaceStore): `--hf owner/repo[:quant]`.  One command from an empty
+// machine to a running server is the point; a file someone already pulled
+// with huggingface_hub or llama.cpp is reused, not downloaded again.
+var hfGguf: String?
+var hfSize: Int64?
+func fileSize(_ u: URL) -> Int64? {
+    ((try? FileManager.default.attributesOfItem(
+        atPath: u.resolvingSymlinksInPath().path))?[.size] as? NSNumber)?.int64Value
+}
+if let text = arg("hf") {
+    func fail(_ m: String, _ code: Int32 = 1) -> Never {
+        FileHandle.standardError.write(Data("[tempo9] \(m)\n".utf8))
+        exit(code)
+    }
+    guard let ref = HuggingFaceStore.parse(text) else {
+        fail("--hf takes owner/repo[:quant], e.g."
+             + " unsloth/Qwen3.5-9B-GGUF:Q4_K_S", 2)
+    }
+    let root = HuggingFaceStore.hubRoot()
+    let offline = ProcessInfo.processInfo.environment["HF_HUB_OFFLINE"] == "1"
+    let listing: HuggingFaceStore.Listing?
+    do {
+        listing = offline ? nil : try HuggingFaceStore.listing(ref.repo)
+    } catch {
+        // Offline is a normal state for a laptop.  A copy already in the
+        // cache is the right answer then; only say why it is not fresh.
+        guard let c = HuggingFaceStore.cachedOffline(ref, root: root) else {
+            fail("hf: \(error)")
+        }
+        FileHandle.standardError.write(Data(
+            "[tempo9] hf: \(error); using the cached \(c.lastPathComponent)\n".utf8))
+        listing = nil
+        hfGguf = c.path
+        hfSize = fileSize(c)
+    }
+    if offline {
+        guard let c = HuggingFaceStore.cachedOffline(ref, root: root) else {
+            fail("hf: HF_HUB_OFFLINE=1 and \(ref.repo) is not in \(root.path)")
+        }
+        FileHandle.standardError.write(Data(
+            "[tempo9] hf: offline, cached \(c.lastPathComponent)\n".utf8))
+        hfGguf = c.path
+        hfSize = fileSize(c)
+    }
+    if let listing {
+        let file: HuggingFaceStore.RemoteFile
+        switch HuggingFaceStore.choose(listing.files, quant: ref.quant) {
+        case .success(let f): file = f
+        case .failure(.noGGUF): fail("hf: \(ref.repo) has no GGUF weights")
+        case .failure(.noMatch(let q, let have)):
+            fail("hf: \(ref.repo) has no \(q); it has "
+                 + have.joined(separator: ", "), 2)
+        case .failure(.ambiguous(let have)):
+            fail("hf: \(ref.repo) has several GGUFs; pick one with"
+                 + " \(ref.repo):<quant> -- " + have.joined(separator: ", "), 2)
+        case .failure(.split(let p)):
+            fail("hf: \(p) is split into parts, which this engine does not"
+                 + " load; pick a single-file quant")
+        }
+        let gb = Double(file.size) / 1e9
+        let have = HuggingFaceStore.cached(file, repo: ref.repo, root: root) != nil
+        FileHandle.standardError.write(Data(String(format:
+            "[tempo9] hf: %@/%@ (%.1f GB)%@\n", ref.repo, file.path, gb,
+            have ? ", cached" : " -> \(root.path)").utf8))
+        let tty = isatty(2) != 0
+        let start = Date()
+        nonisolated(unsafe) var lastPct = -1
+        // Rate over THIS run's bytes: a resumed download starts with the
+        // earlier run's bytes already counted, which read as 900 MB/s.
+        nonisolated(unsafe) var firstDone: Int64 = -1
+        do {
+            let path = try HuggingFaceStore.fetch(
+                file, repo: ref.repo, revision: listing.revision, root: root
+            ) { done, total in
+                let pct = Int(Double(done) * 100 / Double(max(total, 1)))
+                if firstDone < 0 { firstDone = done }
+                let secs = max(Date().timeIntervalSince(start), 0.001)
+                let line = String(format: "[tempo9] hf: %3d%%  %.2f / %.2f GB  %.0f MB/s",
+                                  pct, Double(done) / 1e9, Double(total) / 1e9,
+                                  Double(done - firstDone) / 1e6 / secs)
+                if tty {
+                    FileHandle.standardError.write(Data(("\r" + line).utf8))
+                } else if pct / 10 != lastPct / 10 {
+                    FileHandle.standardError.write(Data((line + "\n").utf8))
+                }
+                lastPct = pct
+            }
+            if tty && !have { FileHandle.standardError.write(Data("\n".utf8)) }
+            hfGguf = path.path
+            hfSize = file.size
+        } catch {
+            if tty { FileHandle.standardError.write(Data("\n".utf8)) }
+            fail("hf: \(error)")
+        }
+    }
+}
+
 // --graph is optional for a .gguf: the engine builds the graph itself.
-guard let gguf = ollamaGguf ?? arg("gguf")
+guard let gguf = hfGguf ?? ollamaGguf ?? arg("gguf")
         ?? (CommandLine.arguments.count == 2
             && CommandLine.arguments[1].hasSuffix(".gguf")
             ? CommandLine.arguments[1] : nil) else {
-    let usage = "usage: tempo9 (--gguf <.gguf> | --ollama <model[:tag]>)"
+    let usage = "usage: tempo9 (--gguf <.gguf> | --hf <owner/repo[:quant]>"
+        + " | --ollama <model[:tag]>)"
         + " [--graph <.asgraph>] [--name <id>]\n"
         + "       [--port 11435] [--max-length 32768] [--max-batch 16]"
         + " [--speculation-k 0] [--tower <dir>]\n"
@@ -157,7 +256,11 @@ Task {
         // GGUF header, and a guessed "q4_K_M" on a file that is not one is
         // worse than a blank field a user can ignore.
         var info = Tempo9ModelInfo()
-        if let e = ollamaEntry {
+        if let n = hfSize {
+            // A snapshot path is a symlink into blobs/; its own size is
+            // the link's, not the model's.
+            info.sizeBytes = n
+        } else if let e = ollamaEntry {
             // The path we hand the engine is a symlink, and asking the file
             // system for its size answers with the length of the link's
             // target string.  The store already measured the real blob.

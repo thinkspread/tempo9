@@ -667,7 +667,8 @@ public final class OpenAIServer: @unchecked Sendable {
                     let turn = try await session.prepare(
                         messages: messages, config: cfg,
                         enableThinking: thinking,
-                        tools: tmplTools.isEmpty ? nil : tmplTools)
+                        tools: tmplTools.isEmpty ? nil : tmplTools,
+                        cacheBreakpoints: parsed.cacheBreakpoints)
                     return (turn, turn.warnings)
                 },
                 generate: { turn, onDelta in

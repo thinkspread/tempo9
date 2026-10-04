@@ -86,6 +86,98 @@ conversation unchanged. The same folding applies to `system` and
 `count_tokens` counts the folded prompt, so its number is the one
 `/v1/messages` prefills.
 
+## Prompt caching: `cache_control`
+
+Claude Code marks `cache_control` breakpoints (`ttl: "1h"`) on its system
+blocks and on the last message of every request. The server forwards
+them to the engine's prefix cache as pinned cache points, so the
+prefix a breakpoint closes stays resumable for its TTL (5 min or 1 h)
+even after later turns change everything behind it. On a hybrid model
+(Qwen3.5) that also keeps the recurrent-state snapshot there, without
+which a cached prefix cannot be resumed at all.
+
+Every breakpoint is located by rendering the prefix it closes with the
+model's own chat template and checking it is a byte-prefix of the real
+prompt; one that cannot be placed exactly is dropped, never guessed.
+Cost: 25-40 ms per request on Claude Code's ~43k-token prompt.
+
+Beyond the breakpoints the client wrote, the server also pins **the end
+of the tool list**. Anthropic caches in the order tools, system,
+messages, so that boundary is part of every breakpoint's prefix, and it
+is where Claude Code's prompt actually changes: its claude.ai MCP
+connectors finish connecting after the first request, and turn 2
+arrives with ~6k more tokens of tools appended (the Qwen3.5 template
+renders tools first). Measured on Qwen3.5-9B, M5 Pro, `claude -p`
+asking one question, interleaved fresh-server arms:
+
+| | turn-2 cached tokens | wall |
+|---|---|---|
+| neither | 0 of 43,500 | 98.0 s |
+| engine snapshot ladder only (`TEMPO9_CACHE_CONTROL=0`) | 28,672 | 69.6 s |
+| `cache_control` only (`AS_CPU_PREFIX_SNAPSHOT_LADDER=0`) | 31,872 | 63.9 s |
+| both (default) | 30,464 of 42,176 | 63.0 s |
+
+The end pin does not cover every race: in some runs turn 1 also
+carries a transient built-in tool (`WaitForMcpServers`) that turn 2
+drops from the *middle* of the list, ~2.2k tokens before its end. So the
+server also pins the tool boundaries ~1k, 2k, 4k and 8k tokens before
+the end of the list: log-spaced by distance rather than "the last N
+tools", because where a transient tool sorts decides its index and
+nothing decides its distance. A change x tokens before the end then
+resumes from the first rung at or beyond x. Measured, two interleaved
+arms each, turn-2 prefill:
+
+| turn 1 differs from turn 2 by | rungs off | rungs on |
+|---|---|---|
+| `WaitForMcpServers`, 2.2k from the end | 28,672 cached, 22.15 s | 29,952 cached, 20.59 s |
+| a transient tool ~6k from the end | 20,480 cached, 32.12 s | 23,808 cached, 28.55 s |
+| tools appended only | 32,000 cached | same, +0.36 s per session |
+
+The last row is the price: four more snapshots captured on turns 1 and
+2 (none after), ~20 ms of rendering per request, 4 x 25 MB pinned for
+the breakpoint's TTL. `TEMPO9_TOOL_LADDER=0` keeps only the end pin.
+
+`TEMPO9_CACHE_CONTROL=0` turns the forwarding off;
+`TEMPO9_CACHE_POINT_DEBUG=1` logs each resolved point with the tokens on
+both sides of it (`[cache-points] ... tools@131574B->tok 32003 ttl 3600
+["function\"}\n"|"</tools>"]`).
+
+## What to expect: time per question, and which model
+
+Measured on an M5 Pro (24 GB) with Q4_K_S weights, `--max-length 65536`,
+and `claude -p` asked one question per session. Every session started its
+own fresh server unless the row says otherwise. Two runs per cell.
+
+| | Qwen3.5-9B | Gemma-4-E4B |
+|---|---|---|
+| first request: ~40k tokens from nothing | 51 s (~850 tok/s) | 24 s (~1,680 tok/s) |
+| each later tool-call turn (cache hit) | 0.3-1.4 s prefill | 0.5-1 s prefill |
+| "count the .txt files" (1 tool call), whole session | 58 / 65 s | 31 / 45 s |
+| "find where `digest` is defined" (Grep + Read) | 114 / 62 s, both right | 40 s **gave up** / 63 s right |
+| a later session on the **same** server, whole session | 10-23 s (first turn hits 28k-40k) | 26-27 s (first turn hits < 2.5k) |
+
+- **The first question of a new server is the slow one.** Claude Code's
+  system prompt and tool schemas come to about 40k tokens before you
+  have typed anything, and they have to be prefilled once.
+- **Pick Qwen3.5-9B for multi-step work, Gemma-4-E4B for speed.** In this
+  small test Qwen answered 4 of 4 correctly. Gemma answered 3 of 4; on the
+  fourth it searched eight times, never opened the file, and asked the
+  user instead.
+- **Why Gemma does not reuse the cache across sessions.** Gemma 4's chat
+  template puts the system prompt *before* the tool declarations, and
+  Claude Code's system prompt carries per-session text (the working
+  directory, git status, a session-specific scratch path) about 2k tokens
+  in. So every new session differs from the last one ahead of ~30k tokens
+  of tools. Qwen3.5's template puts tools first, which is the order
+  Anthropic's own cache uses, so a new session reuses the tools.
+  Reordering Gemma's template would change what the model sees, so it is
+  not done.
+- **When the MCP connectors finish connecting late, turn 2 costs one more
+  partial prefill.** Claude Code then adds a "MCP Server Instructions"
+  section to the system prompt and appends the MCP tools. On Gemma that
+  section lands ahead of the tool list: 22.7 s once per session. On Qwen
+  it lands after the tools: 18-21 s once per session.
+
 ## Streaming errors are events, not silence
 
 With `stream: true`, anything that can fail before generation -- the

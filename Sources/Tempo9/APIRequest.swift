@@ -283,6 +283,25 @@ enum APIRequest {
         var thinking: Bool
         var stream: Bool
         var warnings: [String] = []
+        /// Where the client put `cache_control`, in converted-message terms.
+        var cacheBreakpoints: [CacheBreakpoint] = []
+    }
+
+    /// TEMPO9_CACHE_CONTROL=0 drops every breakpoint (A/B off-switch).
+    static let cacheControlEnabled =
+        ProcessInfo.processInfo.environment["TEMPO9_CACHE_CONTROL"] != "0"
+
+    /// Anthropic's `cache_control.ttl`: "1h" is 3600, anything else the
+    /// 5-minute default.  nil when the block carries no cache_control.
+    static func cacheTTL(_ block: Any?) -> Int32? {
+        guard let cc = (block as? [String: Any])?["cache_control"]
+                as? [String: Any] else { return nil }
+        return (cc["ttl"] as? String) == "1h" ? 3600 : 300
+    }
+
+    /// The largest TTL among the blocks of `content` (a string has none).
+    static func cacheTTL(ofContent content: Any?) -> Int32? {
+        (content as? [[String: Any]])?.compactMap { cacheTTL($0) }.max()
     }
 
     /// Anthropic content is a string or an array of typed blocks; the
@@ -330,13 +349,27 @@ enum APIRequest {
         // messages[] in order (Claude Code's agent-types preamble is one),
         // as the single leading system message -- see foldSystemMessages.
         var system: [String] = []
+        // cache_control, mapped onto what the conversion produces: a
+        // breakpoint anywhere in the (folded) system is the end of the
+        // system message; one in a message is the end of the last message
+        // that raw message became -- rounded DOWN to a message boundary
+        // the template can locate, never past content the client marked.
+        var systemTTL = cacheTTL(ofContent: body["system"])
+        var messageBreakpoints: [(index: Int, ttl: Int32)] = []
         if let top = try flatten(body["system"], at: "system"),
            !top.isEmpty {
             system.append(top)
         }
         for (mi, m) in rawMessages.enumerated() {
             let role = m["role"] as? String ?? "user"
+            let ttl = cacheTTL(ofContent: m["content"])
+            defer {
+                if role != "system", let ttl, !messages.isEmpty {
+                    messageBreakpoints.append((messages.count - 1, ttl))
+                }
+            }
             if role == "system" {
+                if let ttl { systemTTL = max(systemTTL ?? 0, ttl) }
                 if let text = try flatten(m["content"],
                                           at: "messages[\(mi)].content"),
                    !text.isEmpty {
@@ -401,6 +434,31 @@ enum APIRequest {
         let tools = try ToolCallBridge.fromAnthropic(
             body["tools"] as? [[String: Any]] ?? [],
             stripHosted: stripUnsupportedTools)
+        var breakpoints: [CacheBreakpoint] = []
+        if cacheControlEnabled {
+            let shift = system.isEmpty ? 0 : 1
+            breakpoints = messageBreakpoints.map {
+                .message(index: $0.index + shift, ttl: $0.ttl)
+            }
+            if let systemTTL, !system.isEmpty {
+                breakpoints.insert(.message(index: 0, ttl: systemTTL), at: 0)
+            }
+            // Anthropic caches in the order tools -> system -> messages, and
+            // every breakpoint's prefix starts with the tools.  So the end
+            // of the tool list is a level boundary of every breakpoint, and
+            // the one level Claude Code's prompt actually changes at: its
+            // claude.ai MCP connectors finish connecting after the first
+            // request and APPEND ~6k tokens of tools.  Pinning it costs one
+            // snapshot; missing it re-prefills the whole prompt (measured:
+            // 43k tokens, 50 s on 9B).
+            let toolTTL = (body["tools"] as? [[String: Any]] ?? [])
+                .compactMap { cacheTTL($0) }.max()
+            let anyTTL = ([toolTTL, systemTTL] + messageBreakpoints.map {
+                Optional($0.ttl) }).compactMap { $0 }.max()
+            if !tools.tools.isEmpty, let ttl = anyTTL {
+                breakpoints.insert(.tools(ttl: ttl), at: 0)
+            }
+        }
         let cfg = sampling(body, speculationK: speculationK,
                            defaultMaxTokens: 1024,
                            maxTokensKeys: ["max_tokens"], topP: true)
@@ -409,7 +467,8 @@ enum APIRequest {
         return Anthropic(messages: messages, tools: tools.tools, config: cfg,
                          thinking: thinking,
                          stream: body["stream"] as? Bool ?? false,
-                         warnings: tools.warnings)
+                         warnings: tools.warnings,
+                         cacheBreakpoints: breakpoints)
     }
 
     /// POST /v1/messages/count_tokens.
@@ -538,4 +597,13 @@ enum APIRequest {
                          stream: body["stream"] as? Bool ?? false,
                          warnings: tools.warnings)
     }
+}
+
+/// An Anthropic `cache_control` breakpoint, located in terms the rendered
+/// prompt can answer: the end of the tool list, or the end of message
+/// `index` of the converted conversation (system folded in at 0).
+/// `LocalSession` turns these into token offsets by rendering.
+public enum CacheBreakpoint: Equatable, Sendable {
+    case tools(ttl: Int32)
+    case message(index: Int, ttl: Int32)
 }

@@ -41,6 +41,48 @@ public enum Tempo9Error: Error, CustomStringConvertible, LocalizedError {
     public var errorDescription: String? { description }
 }
 
+/// A prompt position the engine should keep resumable: Anthropic's
+/// `cache_control` breakpoint, in tokens.  The engine pins the prefix-cache
+/// node at the span edge at or below `tokenOffset` (and, on a hybrid model,
+/// captures the recurrent-state snapshot there) so a later prompt that
+/// shares the prefix up to this point resumes from it even when everything
+/// after it changed.
+public struct PromptCachePoint: Sendable, Equatable {
+    /// Exclusive prompt-token offset: the prefix `ids[0..<tokenOffset]`.
+    public var tokenOffset: Int
+    /// 300 or 3600 (Anthropic's "5m" / "1h"); 0 = the engine's default.
+    public var ttlSeconds: Int32
+    public init(tokenOffset: Int, ttlSeconds: Int32 = 0) {
+        self.tokenOffset = tokenOffset
+        self.ttlSeconds = ttlSeconds
+    }
+
+    /// What the engine accepts: strictly increasing offsets inside the
+    /// prompt, and a TTL that never grows along the prompt (Anthropic's own
+    /// rule -- longer-lived breakpoints come first).  Duplicates keep the
+    /// longer TTL; a later point is clamped to the TTL before it rather than
+    /// failing the whole request over a client's ordering.
+    public static func normalized(_ points: [PromptCachePoint],
+                                  promptTokens: Int) -> [PromptCachePoint] {
+        var out: [PromptCachePoint] = []
+        for p in points.sorted(by: { $0.tokenOffset < $1.tokenOffset })
+        where p.tokenOffset > 0 && p.tokenOffset <= promptTokens {
+            let ttl: Int32 = p.ttlSeconds == 3600 ? 3600 : 300
+            if let last = out.last, last.tokenOffset == p.tokenOffset {
+                out[out.count - 1].ttlSeconds = max(last.ttlSeconds, ttl)
+                continue
+            }
+            out.append(PromptCachePoint(tokenOffset: p.tokenOffset,
+                                        ttlSeconds: ttl))
+        }
+        for i in out.indices.dropFirst()
+        where out[i].ttlSeconds > out[i - 1].ttlSeconds {
+            out[i].ttlSeconds = out[i - 1].ttlSeconds
+        }
+        return out
+    }
+}
+
 /// Why generation stopped. Comes from the engine, never inferred by comparing
 /// a token count against a limit -- that inference reports a KV-eviction abort
 /// as a truncation, which both Python servers shipped before it was fixed.
@@ -487,7 +529,8 @@ public final class Engine: @unchecked Sendable {
     /// the engine is what lets it ship without Python.
     public func generate(inputIDs: [Int64],
                          config: SamplingConfig = .init(),
-                         images: ImageEmbeddings? = nil)
+                         images: ImageEmbeddings? = nil,
+                         cachePoints: [PromptCachePoint] = [])
         -> AsyncThrowingStream<GenerationChunk, Error> {
         AsyncThrowingStream { continuation in
             let work = Task.detached { [handle, modelName] in
@@ -495,7 +538,9 @@ public final class Engine: @unchecked Sendable {
                 do {
                     request = try Engine.startRequest(
                         handle: handle, modelName: modelName,
-                        inputIDs: inputIDs, config: config, images: images)
+                        inputIDs: inputIDs, config: config, images: images,
+                        cachePoints: PromptCachePoint.normalized(
+                            cachePoints, promptTokens: inputIDs.count))
                 } catch {
                     continuation.finish(throwing: error)
                     return
@@ -571,7 +616,8 @@ public final class Engine: @unchecked Sendable {
                                      modelName: String,
                                      inputIDs: [Int64],
                                      config: SamplingConfig,
-                                     images: ImageEmbeddings?) throws
+                                     images: ImageEmbeddings?,
+                                     cachePoints: [PromptCachePoint]) throws
         -> te9_request_t? {
         var gen = te9_generate_config()
         gen.struct_size = MemoryLayout<te9_generate_config>.size
@@ -601,6 +647,63 @@ public final class Engine: @unchecked Sendable {
             gen.stop_token_count = stops.count
             try inputIDs.withUnsafeBufferPointer { ids in
                 try modelName.withCString { nameC in
+                    // Cache points only exist on the checked entry point,
+                    // which also wants the model's generation identity --
+                    // read it here, right before the call, so a reload in
+                    // between is refused (NOT_READY) instead of admitted.
+                    if !cachePoints.isEmpty {
+                        var src = te9_model_llm_source()
+                        src.struct_size =
+                            MemoryLayout<te9_model_llm_source>.size
+                        var needed = 0
+                        try Engine.check(
+                            te9_engine_get_model_llm_source(
+                                handle, nameC, &src, nil, 0, &needed),
+                            "get_model_llm_source")
+                        var points = cachePoints.map { p -> te9_prompt_cache_point in
+                            var c = te9_prompt_cache_point()
+                            c.struct_size =
+                                MemoryLayout<te9_prompt_cache_point>.size
+                            c.token_offset = p.tokenOffset
+                            return c
+                        }
+                        var ttls = cachePoints.map { $0.ttlSeconds }
+                        let start = { (head: UnsafePointer<te9_image_embeds>?) throws in
+                            try points.withUnsafeMutableBufferPointer { pts in
+                                try ttls.withUnsafeMutableBufferPointer { tt in
+                                    var cfg = te9_checked_request_config()
+                                    cfg.struct_size = MemoryLayout<
+                                        te9_checked_request_config>.size
+                                    cfg.model_name = nameC
+                                    cfg.expected_engine_generation =
+                                        src.engine_generation
+                                    cfg.expected_model_generation =
+                                        src.model_generation
+                                    cfg.input_ids = ids.baseAddress
+                                    cfg.input_id_count = ids.count
+                                    try withUnsafePointer(to: &gen) { g in
+                                        cfg.generation = g
+                                        cfg.cache_points =
+                                            UnsafePointer(pts.baseAddress)
+                                        cfg.cache_point_count = pts.count
+                                        cfg.cache_point_ttl_seconds =
+                                            UnsafePointer(tt.baseAddress)
+                                        cfg.embeds = head
+                                        try Engine.check(
+                                            te9_request_start_checked(
+                                                handle, &cfg, &request),
+                                            "request_start_checked")
+                                    }
+                                }
+                            }
+                        }
+                        if let images, !images.blocks.isEmpty {
+                            try Engine.withMediaChain(images, start)
+                        } else {
+                            try start(nil)
+                        }
+                        return
+                    }
                     if let images, !images.blocks.isEmpty {
                         try Engine.withMediaChain(images) { head in
                             try Engine.check(
