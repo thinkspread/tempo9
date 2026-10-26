@@ -926,6 +926,25 @@ public final class OpenAIServer: @unchecked Sendable {
         }
     }
 
+    /// Anthropic's usage split.  The three input counts add up to the
+    /// prompt: `cache_read_input_tokens` is what the engine's prefix cache
+    /// served, `cache_creation_input_tokens` what this request newly made
+    /// resumable up to its deepest cache_control breakpoint, and
+    /// `input_tokens` the rest.  Claude Code reads these for its cost and
+    /// context display -- and they make a cache hit visible in the reply
+    /// itself instead of only in the engine log.
+    static func anthropicUsage(_ reply: LocalReply) -> [String: Any] {
+        let prompt = reply.promptTokens
+        let read = min(max(0, Int(reply.engine?.prefixCacheHitTokens ?? 0)),
+                       prompt)
+        let creation = max(0, min(reply.lastCachePoint, prompt) - read)
+        return ["input_tokens": prompt - read - creation,
+                "cache_creation_input_tokens": creation,
+                "cache_read_input_tokens": read,
+                "output_tokens": reply.completionTokens]
+    }
+
+
     // MARK: - the Anthropic turn, as a function of its outputs
 
     /// HTTP status for an error that reached a route after parsing.
@@ -997,7 +1016,11 @@ public final class OpenAIServer: @unchecked Sendable {
                         "id": id, "type": "message",
                         "role": "assistant", "model": modelName,
                         "content": [], "stop_reason": NSNull(),
-                        "usage": ["input_tokens": 0, "output_tokens": 0],
+                        // The cache split is only known once the engine has
+                        // admitted the request; message_delta carries it.
+                        "usage": ["input_tokens": 0, "output_tokens": 0,
+                                  "cache_creation_input_tokens": 0,
+                                  "cache_read_input_tokens": 0],
                     ]])
                 out.event("content_block_start", [
                     "type": "content_block_start", "index": 0,
@@ -1064,7 +1087,7 @@ public final class OpenAIServer: @unchecked Sendable {
                 out.event("message_delta", [
                     "type": "message_delta",
                     "delta": ["stop_reason": stop],
-                    "usage": ["output_tokens": reply.completionTokens]])
+                    "usage": anthropicUsage(reply)])
                 out.event("message_stop", ["type": "message_stop"])
                 out.raw(Data(), close: true)
             } else {
@@ -1094,10 +1117,7 @@ public final class OpenAIServer: @unchecked Sendable {
                     "role": "assistant", "model": modelName,
                     "content": content,
                     "stop_reason": stop,
-                    "usage": [
-                        "input_tokens": reply.promptTokens,
-                        "output_tokens": reply.completionTokens,
-                    ],
+                    "usage": anthropicUsage(reply),
                 ])
             }
         } catch {

@@ -252,6 +252,16 @@ public struct RequestStats: Sendable {
     public var prefixCacheHitTokens: Int64
     public var prefillMs: Double
     public var decodeMs: Double
+
+    public init(promptTokens: Int64, generatedTokens: Int64,
+                prefixCacheHitTokens: Int64, prefillMs: Double,
+                decodeMs: Double) {
+        self.promptTokens = promptTokens
+        self.generatedTokens = generatedTokens
+        self.prefixCacheHitTokens = prefixCacheHitTokens
+        self.prefillMs = prefillMs
+        self.decodeMs = decodeMs
+    }
 }
 
 /// What the engine is doing right now, for the inspector and bug reports.

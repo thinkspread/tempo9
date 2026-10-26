@@ -25,9 +25,11 @@ turn, is answered by the real tokenizer over exactly the prompt
 
 The engine's `--max-length` (default `32768`) is a **total** budget per
 request: prompt and reply together. Claude Code's baseline prompt --
-its system text plus the schemas of its 29 tools -- is about **32k
-tokens before you have typed anything**, and it sends `max_tokens:
-32000` on every request. So on a default server every turn is over
+its system text plus its tool schemas -- is about **22k tokens before
+you have typed anything** when it is started from a terminal, and about
+40k when it is started inside the Claude desktop app (see
+[how big the prompt is](#how-big-the-prompt-is-depends-on-how-claude-code-is-started)),
+and it sends `max_tokens: 32000` on every request. So on a default server every turn is over
 budget. Start with room to spare:
 
 ```
@@ -99,7 +101,10 @@ which a cached prefix cannot be resumed at all.
 Every breakpoint is located by rendering the prefix it closes with the
 model's own chat template and checking it is a byte-prefix of the real
 prompt; one that cannot be placed exactly is dropped, never guessed.
-Cost: 25-40 ms per request on Claude Code's ~43k-token prompt.
+Cost: ~50 ms on a session's first request (Claude Code's ~43k-token prompt
+renders ~5 ms a time), ~12 ms on the second, and under 1 ms after
+that -- resolved boundaries are reused while the prompt still starts
+with the same bytes and ids up to them.
 
 Beyond the breakpoints the client wrote, the server also pins **the end
 of the tool list**. Anthropic caches in the order tools, system,
@@ -137,16 +142,85 @@ The last row is the price: four more snapshots captured on turns 1 and
 2 (none after), ~20 ms of rendering per request, 4 x 25 MB pinned for
 the breakpoint's TTL. `TEMPO9_TOOL_LADDER=0` keeps only the end pin.
 
+The reply reports the split the way Anthropic does:
+`usage.cache_read_input_tokens` is what the engine's prefix cache
+served, `cache_creation_input_tokens` what the request newly made
+resumable up to its deepest breakpoint, and `input_tokens` the rest;
+the three add up to the prompt. Streaming puts them on `message_delta`
+(the hit is only known once the engine has admitted the request), and
+Claude Code picks them up from there: `claude -p --output-format json`
+shows `cacheReadInputTokens: 30464` for the run above.
+
 `TEMPO9_CACHE_CONTROL=0` turns the forwarding off;
 `TEMPO9_CACHE_POINT_DEBUG=1` logs each resolved point with the tokens on
 both sides of it (`[cache-points] ... tools@131574B->tok 32003 ttl 3600
 ["function\"}\n"|"</tools>"]`).
 
+## How big the prompt is depends on how Claude Code is started
+
+Measured 2026-10-05 with Claude Code 2.1.267, Qwen3.5-9B Q4_K_S, an
+M5 Pro and a fresh server per row:
+
+| Claude Code started from | tools | first request | its prefill |
+|---|---|---|---|
+| a terminal, `ANTHROPIC_API_KEY=local` | 26 | ~22k tokens | ~21 s |
+| inside a Claude desktop app session | 47-49 | ~36-43k tokens | 39-51 s |
+| a terminal, with `--bare` | 3 | ~1.4k tokens | ~1 s |
+
+- **From a terminal there are no claude.ai connectors.** With an API key
+  set, Claude Code disables them and says so ("claude.ai connectors are
+  disabled because ANTHROPIC_API_KEY or another auth source is set").
+  Turn 2 then reuses everything turn 1 prefilled, and a second session on
+  the same server reuses the tool definitions (17.5k of 21.8k tokens in
+  the measurement above).
+- **Inside the desktop app it inherits the app's login and environment**,
+  so it also loads the Drive and Docs connectors (19 tools, ~6k tokens)
+  and the app's own tools, and the connectors finish connecting after the
+  first request. That is the late-connect case the
+  [cache_control](#prompt-caching-cache_control) section handles; the
+  measurements in [what to expect](#what-to-expect-time-per-question-and-which-model)
+  were taken this way.
+- `--strict-mcp-config` changes nothing from a terminal: there are no MCP
+  servers for it to skip.
+
+### `--bare`: a much smaller prompt, with a trade
+
+`--bare` drops Claude Code's system prompt, CLAUDE.md discovery, hooks,
+plugins, skills and auto-memory, and offers only `Bash`, `Edit` and
+`Read` (`--tools` adds more). Six graded multi-step tasks on a small
+Python project -- find and reason across files, fix a bug and run the
+tests, rename a function across files, add a function and its test, read
+code and conclude, count lines with a command -- two runs each, the two
+modes interleaved on one server, each run on a fresh copy:
+
+| | default | `--bare` |
+|---|---|---|
+| tasks passed | 12 / 12 | 12 / 12 |
+| time for the six tasks | 193 s | 158 s |
+| requests | 74 | 96 |
+
+Questions answered by reading code take 2-3x less time with `--bare`
+(5 s against 11 s), because the first request is ~1k tokens instead of
+~22k. Multi-step edits take more steps without the default prompt's
+guidance (the rename: 17 requests against 7.5; fix-and-test: 42 s
+against 32 s). So `--bare` suits quick questions; keep the default when
+the project relies on CLAUDE.md or the work is long and multi-step.
+Small tasks and two runs each: an indication, not a benchmark.
+
+`--bare` needs a server that maps a tool call's name onto the tool the
+client declared: it declares `Bash`, Qwen3.5 calls `bash`, and a server
+that passes the name through gets "No such tool available: bash" back
+and a model that retries it without end.
+
 ## What to expect: time per question, and which model
 
 Measured on an M5 Pro (24 GB) with Q4_K_S weights, `--max-length 65536`,
-and `claude -p` asked one question per session. Every session started its
-own fresh server unless the row says otherwise. Two runs per cell.
+and `claude -p` asked one question per session, with Claude Code started
+inside a Claude desktop app session -- the ~40k-token case
+[above](#how-big-the-prompt-is-depends-on-how-claude-code-is-started);
+from a terminal the first request is about half that. Every session
+started its own fresh server unless the row says otherwise. Two runs per
+cell.
 
 | | Qwen3.5-9B | Gemma-4-E4B |
 |---|---|---|

@@ -67,6 +67,27 @@ public struct TokenizerConfig {
         + "|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+"
         + "|\\s+(?!\\S)|\\s+"
 
+    /// Flint (tokenizer.ggml.pre "flint"). Its tokenizer.json is a Sequence
+    /// of three Isolated Splits, not one regex: digit runs of up to three,
+    /// then CJK runs, then this pattern -- each stage re-splitting the pieces
+    /// of the one before.  Folding the three into one alternation is NOT
+    /// equivalent: " 你好" would match the word branch as one piece (CJK is
+    /// \p{Lo}) where the staged split isolates " " first.  The pattern below
+    /// is the third stage verbatim; `preSplits` returns the first two.
+    public static let flintPattern =
+        "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*"
+        + "[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+        + "|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+"
+        + "[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+        + "| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+    static let flintPreSplits = ["\\p{N}{1,3}", "[一-龥぀-ゟ゠-ヿ]+"]
+
+    /// The Isolated Split stages that run BEFORE `pattern(forPretokenizer:)`.
+    /// Empty for every single-regex dialect.
+    public static func preSplits(forPretokenizer pre: String?) -> [String] {
+        return pre == "flint" ? flintPreSplits : []
+    }
+
     /// Pattern for a `tokenizer.ggml.pre` value. Refuses unknown dialects by
     /// name, mirroring TokenizerDialect.from and the engine's
     /// te9_tokenizer_open: a guessed regex still produces valid ids, just
@@ -82,11 +103,13 @@ public struct TokenizerConfig {
             return o200kPattern
         case "tekken":
             return tekkenPattern
+        case "flint":
+            return flintPattern
         default:
             throw GGUFError.missingKey(
                 "unsupported tokenizer.ggml.pre '\(pre ?? "")' -- this build "
                 + "implements qwen2/qwen35/gpt-2/default, llama-bpe/llama3, "
-                + "gpt-4o, and tekken")
+                + "gpt-4o, tekken, and flint")
         }
     }
 }
@@ -121,7 +144,7 @@ public enum Normalization: String {
     /// dialects at once.
     public static func forPretokenizer(_ pre: String?) -> Normalization {
         switch pre ?? "" {
-        case "llama3", "llama-bpe", "gpt-4o", "tekken":
+        case "llama3", "llama-bpe", "gpt-4o", "tekken", "flint":
             return .none
         default:
             return .nfc
@@ -260,6 +283,8 @@ public final class BPETokenizer {
     private var specialsByFirstByte: [[(bytes: [UInt8], id: Int)]] =
         Array(repeating: [], count: 256)
     private let regex: NSRegularExpression
+    /// Isolated Split stages applied before `regex` (Flint); empty otherwise.
+    private let preSplitRegexes: [NSRegularExpression]
     private let byteEncoder: [UInt8: Character]
     private let byteDecoder: [Character: UInt8]
     private let normalization: Normalization
@@ -292,6 +317,8 @@ public final class BPETokenizer {
                       pattern: dialect == .gemma4
                           ? TokenizerConfig.qwenPattern
                           : TokenizerConfig.pattern(forPretokenizer: pre),
+                      preSplits: dialect == .gemma4
+                          ? [] : TokenizerConfig.preSplits(forPretokenizer: pre),
                       normalization: dialect == .gemma4
                           ? .none : .forPretokenizer(pre))
 
@@ -301,7 +328,14 @@ public final class BPETokenizer {
         isHarmony = pre == "gpt-4o" && id(of: "<|channel|>") != nil
 
         var stops = eosTokenID.map { [$0] } ?? []
-        for name in Self.endOfTurnNames(for: dialect) {
+        // Flint ends an assistant turn by starting the next one, and the
+        // .gguf records only <|end_of_text|>.  config.json's eos_token_id
+        // lists four: <|end_of_text|>, <|user|>, <|observation|> and
+        // <|developer|> (llama.cpp's EOG list has the middle two, not the
+        // last).
+        let preStops = pre == "flint"
+            ? ["<|user|>", "<|observation|>", "<|developer|>"] : []
+        for name in Self.endOfTurnNames(for: dialect) + preStops {
             if let id = id(of: name), !stops.contains(id) { stops.append(id) }
         }
         stopTokenIDs = stops
@@ -310,9 +344,11 @@ public final class BPETokenizer {
     public init(tokens: [String], merges: [String], tokenTypes: [Double],
                 dialect: TokenizerDialect = .gpt2,
                 pattern: String = TokenizerConfig.qwenPattern,
+                preSplits: [String] = [],
                 normalization: Normalization = .nfc) throws {
         self.vocabulary = tokens
         self.regex = try NSRegularExpression(pattern: pattern)
+        self.preSplitRegexes = try preSplits.map { try NSRegularExpression(pattern: $0) }
         self.normalization = normalization
         self.dialect = dialect
 
@@ -461,11 +497,7 @@ public final class BPETokenizer {
             encodeSentencePiece(text, into: &out)
             return
         }
-        let ns = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0,
-                                                             length: ns.length))
-        for match in matches {
-            let piece = ns.substring(with: match.range)
+        for piece in pieces(of: text) {
             guard !piece.isEmpty else { continue }
             var mapped = ""
             for byte in Array(piece.utf8) {
@@ -481,6 +513,44 @@ public final class BPETokenizer {
                 // <unk> the model was not trained to see would be worse.
             }
         }
+    }
+
+    /// The pre-tokenizer's pieces.  One regex: its matches (every dialect's
+    /// pattern ends in \s+, so between them nothing is left over).  Staged
+    /// (Flint): HF's Split with behavior Isolated at every stage, which
+    /// keeps the text BETWEEN matches as pieces too -- the last stage has no
+    /// digit branch, so a digit piece from stage one matches nothing there
+    /// and must survive as itself rather than vanish.
+    private func pieces(of text: String) -> [String] {
+        let ns = text as NSString
+        if preSplitRegexes.isEmpty {
+            return regex.matches(in: text, range: NSRange(location: 0,
+                                                          length: ns.length))
+                .map { ns.substring(with: $0.range) }
+        }
+        var current = [text]
+        for r in preSplitRegexes + [regex] {
+            var next: [String] = []
+            for piece in current {
+                let pns = piece as NSString
+                var cursor = 0
+                for m in r.matches(in: piece, range: NSRange(location: 0,
+                                                             length: pns.length))
+                where m.range.length > 0 {
+                    if m.range.location > cursor {
+                        next.append(pns.substring(with: NSRange(
+                            location: cursor, length: m.range.location - cursor)))
+                    }
+                    next.append(pns.substring(with: m.range))
+                    cursor = m.range.location + m.range.length
+                }
+                if cursor < pns.length {
+                    next.append(pns.substring(from: cursor))
+                }
+            }
+            current = next
+        }
+        return current
     }
 
     /// gemma4: rewrite spaces, then BPE the WHOLE segment at once.

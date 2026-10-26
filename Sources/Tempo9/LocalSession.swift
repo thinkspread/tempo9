@@ -107,6 +107,9 @@ public struct LocalReply: Sendable {
     /// left after the prompt -- and that clamped value, not the caller's,
     /// is the one a `stop_reason: "max_tokens"` has to be judged against.
     public var maxTokens: Int
+    /// The deepest cache point this request handed the engine (0 = none):
+    /// what Anthropic's `cache_creation_input_tokens` counts up to.
+    public var lastCachePoint: Int = 0
 }
 
 /// A turn after `LocalSession.prepare` and before `LocalSession.run`: the
@@ -978,7 +981,9 @@ public final class LocalSession {
                         completionTokens: generated,
                         seconds: Date().timeIntervalSince(started),
                         engine: engineStats,
-                        maxTokens: cfg.maxTokens)
+                        maxTokens: cfg.maxTokens,
+                        lastCachePoint: turn.cachePoints
+                            .map(\.tokenOffset).max() ?? 0)
     }
 
     // MARK: - cache_control -> engine cache points
@@ -987,6 +992,28 @@ public final class LocalSession {
     /// and immutable, so it only grows; guarded by the turn gate like
     /// tokCache.
     private var tokenByteLength: [Int: Int] = [:]
+
+    /// A boundary resolved for an earlier request, reusable while a prompt
+    /// still starts with the same bytes -- and the same ids -- up to it and
+    /// continues with the same few bytes after it.  That check is what
+    /// makes reuse exact rather than a guess: tools appended (Claude Code's
+    /// late connectors), a system prompt edited ahead of the boundary, a
+    /// template re-rendering an earlier turn, or a message that grew past
+    /// its old end each fail it, and the boundary is rendered afresh.
+    struct BoundaryMemo {
+        let prefixBytes: [UInt8]
+        let tailBytes: [UInt8]
+        let prefixIDs: [Int]
+        let toolsCount: Int
+        /// (byte offset, token offset) of every point this entry yields.
+        let points: [(byte: Int, token: Int, note: String)]
+    }
+    /// Keyed "tools" (end + rungs) and "msg<k>".  Guarded by the turn gate.
+    private var boundaryMemo: [String: BoundaryMemo] = [:]
+    /// The bytes the generation prompt appends, per enable_thinking, and
+    /// whether a full render has confirmed that `prompt = render(messages)
+    /// + suffix` for this template (only then is it trusted).
+    private var generationSuffix: [Bool: (bytes: [UInt8], verified: Bool)] = [:]
 
     /// Resolve Anthropic breakpoints to prompt-token offsets.
     ///
@@ -997,6 +1024,13 @@ public final class LocalSession {
     /// one can ever hit.  A breakpoint that cannot be placed exactly is
     /// dropped, never guessed: these are hints, and a request must never
     /// fail or slow down over one.
+    ///
+    /// Rendering is the whole cost (~5 ms per render of Claude Code's ~43k
+    /// token prompt, 9-11 renders, 45-57 ms a request), and almost all of
+    /// it repeats every turn: the tools and the system prompt do not
+    /// change.  Boundaries are memoized (BoundaryMemo) and the last
+    /// message's end comes from the generation suffix, so a later turn
+    /// renders only what is new in it.
     func resolveCachePoints(_ breakpoints: [CacheBreakpoint],
                             messages: [[String: Any]],
                             tools: [[String: Any]]?,
@@ -1004,19 +1038,63 @@ public final class LocalSession {
                             prompt: String, ids: [Int]) -> [PromptCachePoint] {
         let t0 = Date()
         let promptBytes = Array(prompt.utf8)
-        func render(_ msgs: [[String: Any]],
-                    _ t: [[String: Any]]?) -> [UInt8]? {
+        let toolsCount = tools?.count ?? 0
+        var renders = 0, renderSeconds = 0.0
+        func render(_ msgs: [[String: Any]], _ t: [[String: Any]]?,
+                    generation: Bool = false) -> [UInt8]? {
+            let r0 = Date()
+            defer { renders += 1; renderSeconds += Date().timeIntervalSince(r0) }
             var e: [String: Any] = ["enable_thinking": enableThinking]
             if let t, !t.isEmpty { e["tools"] = t }
             return (try? template.render(messages: msgs,
-                                         addGenerationPrompt: false,
+                                         addGenerationPrompt: generation,
                                          extra: e)).map { Array($0.utf8) }
+        }
+        // Byte offset -> token offset: one prefix-sum pass, then a binary
+        // search per point.
+        var cumulative: [Int] = []
+        func tokenOffset(atByte limit: Int) -> Int {
+            if cumulative.isEmpty { cumulative = cumulativeBytes(ids) }
+            return Self.tokenOffset(atByte: limit, cumulative: cumulative)
+        }
+        func memo(_ key: String) -> BoundaryMemo? {
+            guard let m = boundaryMemo[key], m.toolsCount == toolsCount,
+                  Self.matches(promptBytes, at: 0, m.prefixBytes),
+                  Self.matches(promptBytes, at: m.prefixBytes.count,
+                               m.tailBytes),
+                  ids.count >= m.prefixIDs.count,
+                  ids[0..<m.prefixIDs.count].elementsEqual(m.prefixIDs)
+            else { return nil }
+            return m
+        }
+        func remember(_ key: String, end: Int,
+                      _ found: [(byte: Int, token: Int, note: String)]) {
+            if boundaryMemo.count >= 32 { boundaryMemo.removeAll() }
+            let deepest = found.map(\.token).max() ?? 0
+            boundaryMemo[key] = BoundaryMemo(
+                prefixBytes: Array(promptBytes[0..<end]),
+                tailBytes: Array(promptBytes[end..<min(end + 16,
+                                                       promptBytes.count)]),
+                prefixIDs: Array(ids[0..<deepest]),
+                toolsCount: toolsCount, points: found)
         }
         var points: [PromptCachePoint] = []
         var notes: [String] = []
+        func emit(_ found: [(byte: Int, token: Int, note: String)],
+                  ttl: Int32, memoized: Bool) {
+            for f in found {
+                points.append(PromptCachePoint(tokenOffset: f.token,
+                                               ttlSeconds: ttl))
+                notes.append(f.note + (memoized ? " memo" : ""))
+            }
+        }
         for bp in breakpoints {
             switch bp {
             case let .tools(ttl):
+                if let m = memo("tools") {
+                    emit(m.points, ttl: ttl, memoized: true)
+                    continue
+                }
                 // Where does the tool list END?  Render the head once as is
                 // and once with one more tool appended: the renders agree
                 // exactly up to the slot a new tool would occupy.  That is
@@ -1036,10 +1114,8 @@ public final class LocalSession {
                 let n = min(Self.commonPrefix(a, b),
                             Self.commonPrefix(a, promptBytes))
                 guard n > 0 else { notes.append("tools: empty"); continue }
-                let endTok = tokenOffset(atByte: n, in: ids)
-                points.append(PromptCachePoint(tokenOffset: endTok,
-                                               ttlSeconds: ttl))
-                notes.append("tools@\(n)B")
+                let endTok = tokenOffset(atByte: n)
+                var found = [(byte: n, token: endTok, note: "tools@\(n)B")]
                 // The end pin covers tools APPENDED.  A tool that appears or
                 // disappears inside the list moves the prompt earlier --
                 // Claude Code carries a transient WaitForMcpServers in its
@@ -1066,19 +1142,38 @@ public final class LocalSession {
                         else { continue }
                         let m = Self.commonPrefix(r, promptBytes)
                         guard m > 0, m < n else { continue }
-                        points.append(PromptCachePoint(
-                            tokenOffset: tokenOffset(atByte: m, in: ids),
-                            ttlSeconds: ttl))
-                        notes.append("tool\(k)@\(m)B")
+                        found.append((byte: m, token: tokenOffset(atByte: m),
+                                      note: "tool\(k)@\(m)B"))
                     }
                 }
+                remember("tools", end: n, found)
+                emit(found, ttl: ttl, memoized: false)
             case let .message(k, ttl):
                 guard k >= 0, k < messages.count else {
                     notes.append("msg\(k): out of range"); continue
                 }
-                let prefix = Array(messages[0...k])
+                let key = "msg\(k)"
+                if let m = memo(key) {
+                    emit(m.points, ttl: ttl, memoized: true)
+                    continue
+                }
+                let isLast = k == messages.count - 1
+                let suffix = isLast
+                    ? generationSuffixBytes(enableThinking, render: render)
+                    : nil
+                let byLength = suffix.flatMap { sfx -> Int? in
+                    Self.matches(promptBytes,
+                                 at: promptBytes.count - sfx.bytes.count,
+                                 sfx.bytes)
+                        ? promptBytes.count - sfx.bytes.count : nil
+                }
                 let end: Int
-                if let a = render(prefix, tools) {
+                if let byLength, suffix?.verified == true {
+                    // The last message ends where the generation prompt
+                    // begins -- no render needed once this template has
+                    // been seen to work that way.
+                    end = byLength
+                } else if let a = render(Array(messages[0...k]), tools) {
                     // A template may render a message differently once it
                     // is no longer the last one (Qwen3's reasoning on past
                     // assistant turns); then the prefix is not the
@@ -1087,8 +1182,13 @@ public final class LocalSession {
                         notes.append("msg\(k): not a prefix"); continue
                     }
                     end = a.count
-                } else if let a = render(prefix + [Self.probeUser(1)], tools),
-                          let b = render(prefix + [Self.probeUser(2)], tools) {
+                    if isLast, let byLength, byLength == end {
+                        generationSuffix[enableThinking]?.verified = true
+                    }
+                } else if let a = render(Array(messages[0...k])
+                                            + [Self.probeUser(1)], tools),
+                          let b = render(Array(messages[0...k])
+                                            + [Self.probeUser(2)], tools) {
                     // The prefix alone does not render (a system message
                     // with no user query).  Follow it with two different
                     // user turns: the renders agree up to the start of
@@ -1102,15 +1202,16 @@ public final class LocalSession {
                 } else {
                     notes.append("msg\(k): no render"); continue
                 }
-                points.append(PromptCachePoint(
-                    tokenOffset: tokenOffset(atByte: end, in: ids),
-                    ttlSeconds: ttl))
-                notes.append("msg\(k)@\(end)B")
+                let found = [(byte: end, token: tokenOffset(atByte: end),
+                              note: "msg\(k)@\(end)B")]
+                remember(key, end: end, found)
+                emit(found, ttl: ttl, memoized: false)
             }
         }
         if ProcessInfo.processInfo.environment["TEMPO9_CACHE_POINT_DEBUG"] == "1" {
-            var line = String(format: "[cache-points] %.1f ms, %d ids:",
-                              Date().timeIntervalSince(t0) * 1e3, ids.count)
+            var line = String(format: "[cache-points] %.1f ms (%d renders %.1f ms), %d ids:",
+                              Date().timeIntervalSince(t0) * 1e3, renders,
+                              renderSeconds * 1e3, ids.count)
             for (note, p) in zip(notes.filter { $0.contains("@") }, points) {
                 let lo = max(0, p.tokenOffset - 3), hi = min(ids.count, p.tokenOffset + 3)
                 let before = String(decoding: tokenizer.decodeBytes(
@@ -1128,12 +1229,28 @@ public final class LocalSession {
         return points
     }
 
-    /// The number of leading tokens whose decoded bytes fit in `limit`
-    /// bytes of the prompt.  `ids` IS the prompt's tokenization, so its
-    /// decoded bytes are the prompt's bytes; a token straddling the limit
-    /// is excluded, which keeps the point at or before the boundary.
-    private func tokenOffset(atByte limit: Int, in ids: [Int]) -> Int {
-        var bytes = 0
+    /// What the generation prompt appends for this template, from two tiny
+    /// renders, computed once per enable_thinking.  nil when adding the
+    /// generation prompt does anything but append.
+    private func generationSuffixBytes(
+        _ enableThinking: Bool,
+        render: ([[String: Any]], [[String: Any]]?, Bool) -> [UInt8]?)
+        -> (bytes: [UInt8], verified: Bool)? {
+        if let s = generationSuffix[enableThinking] { return s }
+        let probe = [Self.probeUser(1)]
+        guard let plain = render(probe, nil, false),
+              let withGen = render(probe, nil, true),
+              withGen.count > plain.count,
+              Self.matches(withGen, at: 0, plain)
+        else { return nil }
+        let s = (bytes: Array(withGen[plain.count...]), verified: false)
+        generationSuffix[enableThinking] = s
+        return s
+    }
+
+    /// cumulative[i] = decoded byte length of ids[0..<i].
+    private func cumulativeBytes(_ ids: [Int]) -> [Int] {
+        var out = [Int](repeating: 0, count: ids.count + 1)
         for (i, id) in ids.enumerated() {
             let len: Int
             if let l = tokenByteLength[id] {
@@ -1143,10 +1260,47 @@ public final class LocalSession {
                                             preserving: []).count
                 tokenByteLength[id] = len
             }
-            if bytes + len > limit { return i }
-            bytes += len
+            out[i + 1] = out[i] + len
         }
-        return ids.count
+        return out
+    }
+
+    /// The number of leading tokens whose decoded bytes fit in `limit`
+    /// bytes of the prompt.  `ids` IS the prompt's tokenization, so its
+    /// decoded bytes are the prompt's bytes; a token straddling the limit
+    /// is excluded, which keeps the point at or before the boundary.
+    ///
+    /// Exact for byte-level BPE.  For SentencePiece the decoded bytes can
+    /// run AHEAD of the prompt (the encoder's space prefix decodes as
+    /// content), so the offset can come out a few tokens early -- never
+    /// late.  Early is safe: the point still precedes the boundary, and the
+    /// engine floors it to a 128-token span edge anyway.  (decodeBytes
+    /// decodes each id on its own and strips nothing, so per-id lengths do
+    /// add up to the sequence's; the first-token rule lives in
+    /// IncrementalDecoder.)
+    static func tokenOffset(atByte limit: Int, cumulative: [Int]) -> Int {
+        // Largest i with cumulative[i] <= limit.
+        var lo = 0, hi = cumulative.count - 1
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if cumulative[mid] <= limit { lo = mid } else { hi = mid - 1 }
+        }
+        return lo
+    }
+
+    /// Does `haystack` contain `needle` at byte `offset`?
+    static func matches(_ haystack: [UInt8], at offset: Int,
+                        _ needle: [UInt8]) -> Bool {
+        guard offset >= 0, offset + needle.count <= haystack.count else {
+            return false
+        }
+        if needle.isEmpty { return true }
+        return haystack.withUnsafeBufferPointer { h in
+            needle.withUnsafeBufferPointer { n in
+                memcmp(h.baseAddress! + offset, n.baseAddress!,
+                       needle.count) == 0
+            }
+        }
     }
 
     static func commonPrefix(_ a: [UInt8], _ b: [UInt8]) -> Int {

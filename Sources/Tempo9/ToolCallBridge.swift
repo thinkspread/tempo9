@@ -134,15 +134,47 @@ enum ToolCallBridge {
         }
         let types = argTypes(tools)
         let xml = ToolCallParser.parse(text)
-        guard !xml.isEmpty else { return parse(text) }
+        guard !xml.isEmpty else {
+            let json = parse(text)
+            return (json.text, json.calls.map {
+                Call(name: canonicalName($0.name, tools: tools),
+                     argumentsJSON: $0.argumentsJSON)
+            })
+        }
         let calls = xml.map { c -> Call in
-            let typed = coerce(c.arguments, to: types[c.name] ?? [:])
+            let name = canonicalName(c.name, tools: tools)
+            let typed = coerce(c.arguments, to: types[name] ?? [:])
             let data = (try? JSONSerialization.data(withJSONObject: typed))
                 ?? Data("{}".utf8)
-            return Call(name: c.name,
+            return Call(name: name,
                         argumentsJSON: String(data: data, encoding: .utf8) ?? "{}")
         }
         return (textBeforeCalls(text), calls)
+    }
+
+    /// The declared tool a model's call means.
+    ///
+    /// An exact match wins.  Otherwise the ONE declared name equal to it
+    /// ignoring case and `.`/`_` (the template flattens dots) -- measured:
+    /// Claude Code in `--bare` mode declares `Bash`/`Edit`/`Read`, Qwen3.5
+    /// called `bash`, Claude Code answered "No such tool available: bash",
+    /// and the model called `bash` again, 700+ times without end.  A name
+    /// with no such match, or with several, is returned as written: then
+    /// the client refuses it by name, which is the honest outcome for a
+    /// tool that does not exist.
+    static func canonicalName(_ name: String,
+                              tools: [[String: Any]]) -> String {
+        var declared: [String] = []
+        for t in tools {
+            let fn = (t["function"] as? [String: Any]) ?? t
+            if let n = fn["name"] as? String { declared.append(n) }
+        }
+        if declared.contains(name) { return name }
+        func key(_ s: String) -> String {
+            s.lowercased().replacingOccurrences(of: ".", with: "_")
+        }
+        let hits = declared.filter { key($0) == key(name) }
+        return hits.count == 1 ? hits[0] : name
     }
 
     /// Split a finished reply into visible text and tool calls.
@@ -264,7 +296,14 @@ enum ToolCallBridge {
         /// back (see parse(_:tools:)).  The argument is required on purpose
         /// -- every call site has to say which kind of request it serves.
         private let passThrough: Bool
-        init(tools: [[String: Any]]) { passThrough = tools.isEmpty }
+        /// The declared tools, so names announced early are the declared
+        /// spellings (see canonicalName) -- the same ones the final parse
+        /// reports.
+        private let tools: [[String: Any]]
+        init(tools: [[String: Any]]) {
+            passThrough = tools.isEmpty
+            self.tools = tools
+        }
 
         private var pending = ""
         private var suppressing = false
@@ -317,7 +356,7 @@ enum ToolCallBridge {
             guard names.count > announced else { return [] }
             let fresh = Array(names[announced...])
             announced = names.count
-            return fresh
+            return fresh.map { ToolCallBridge.canonicalName($0, tools: tools) }
         }
 
         /// How many calls have been announced to the client so far.

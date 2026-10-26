@@ -119,3 +119,75 @@ struct ToolLadderTests {
             distances: [150, 1000]) == [1])
     }
 }
+
+@Suite("Anthropic usage reports the cache")
+struct AnthropicCacheUsageTests {
+    private func reply(prompt: Int, hit: Int64?, lastPoint: Int) -> LocalReply {
+        LocalReply(text: "3", reasoning: "", promptTokens: prompt,
+                   completionTokens: 2, seconds: 0,
+                   engine: hit.map {
+                       RequestStats(promptTokens: Int64(prompt),
+                                    generatedTokens: 2,
+                                    prefixCacheHitTokens: $0,
+                                    prefillMs: 0, decodeMs: 0)
+                   },
+                   maxTokens: 64, lastCachePoint: lastPoint)
+    }
+
+    @Test("read + creation + input add up to the prompt")
+    func split() {
+        // Claude Code turn 2: 43479 tokens, 32000 served from the cache,
+        // last breakpoint (the tool_result) at 43461.
+        let u = OpenAIServer.anthropicUsage(
+            reply(prompt: 43479, hit: 32000, lastPoint: 43461))
+        #expect(u["cache_read_input_tokens"] as? Int == 32000)
+        #expect(u["cache_creation_input_tokens"] as? Int == 11461)
+        #expect(u["input_tokens"] as? Int == 18)
+        #expect(u["output_tokens"] as? Int == 2)
+    }
+
+    @Test("no breakpoints: nothing is created; no engine stats: nothing read")
+    func degenerate() {
+        let a = OpenAIServer.anthropicUsage(
+            reply(prompt: 100, hit: 64, lastPoint: 0))
+        #expect(a["cache_read_input_tokens"] as? Int == 64)
+        #expect(a["cache_creation_input_tokens"] as? Int == 0)
+        #expect(a["input_tokens"] as? Int == 36)
+        let b = OpenAIServer.anthropicUsage(
+            reply(prompt: 100, hit: nil, lastPoint: 90))
+        #expect(b["cache_read_input_tokens"] as? Int == 0)
+        #expect(b["cache_creation_input_tokens"] as? Int == 90)
+        #expect(b["input_tokens"] as? Int == 10)
+        // A hit past the last breakpoint (the engine resumes from its own
+        // frontier) creates nothing and never goes negative.
+        let c = OpenAIServer.anthropicUsage(
+            reply(prompt: 100, hit: 96, lastPoint: 90))
+        #expect(c["cache_creation_input_tokens"] as? Int == 0)
+        #expect(c["input_tokens"] as? Int == 4)
+    }
+}
+
+@Suite("cache point offsets")
+struct CachePointOffsetTests {
+    /// cumulative bytes of tokens with lengths 3, 1, 4, 2: [0, 3, 4, 8, 10]
+    private let cumulative = [0, 3, 4, 8, 10]
+
+    @Test("a token straddling the boundary is excluded")
+    func straddle() {
+        #expect(LocalSession.tokenOffset(atByte: 0, cumulative: cumulative) == 0)
+        #expect(LocalSession.tokenOffset(atByte: 3, cumulative: cumulative) == 1)
+        #expect(LocalSession.tokenOffset(atByte: 7, cumulative: cumulative) == 2)
+        #expect(LocalSession.tokenOffset(atByte: 8, cumulative: cumulative) == 3)
+        #expect(LocalSession.tokenOffset(atByte: 99, cumulative: cumulative) == 4)
+    }
+
+    @Test("byte matching is bounds-checked")
+    func matches() {
+        let h = Array("<tools>a</tools>".utf8)
+        #expect(LocalSession.matches(h, at: 8, Array("</tools>".utf8)))
+        #expect(!LocalSession.matches(h, at: 9, Array("</tools>".utf8)))
+        #expect(!LocalSession.matches(h, at: 10, Array("</tools>".utf8)))
+        #expect(LocalSession.matches(h, at: 16, []))
+        #expect(!LocalSession.matches(h, at: -1, Array("<".utf8)))
+    }
+}

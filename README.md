@@ -26,9 +26,10 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:11435 ANTHROPIC_API_KEY=local claude
 ```
 
 Claude Code's system prompt alone is about 32k tokens, so give it the
-larger context. Its first request on a fresh server prefills about 40k
-tokens: roughly 50 s with Qwen3.5-9B and 25 s with Gemma-4-E4B on an
-M5 Pro. After that the prefix cache carries it, so each tool-call turn
+larger context. Its first request on a fresh server prefills about 22k
+tokens from a terminal (~21 s with Qwen3.5-9B on an M5 Pro); started
+inside the Claude desktop app it is about 40k: roughly 50 s with
+Qwen3.5-9B and 25 s with Gemma-4-E4B. After that the prefix cache carries it, so each tool-call turn
 prefills in under 1.5 s, and a later Qwen session on the same server
 took 10-23 s for a whole question. Qwen3.5-9B is the more reliable
 choice for multi-step work; Gemma-4-E4B is faster.
