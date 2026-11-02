@@ -136,4 +136,70 @@ struct HuggingFaceStoreTests {
         #expect(try HuggingFaceStore.sha256(of: u)
                 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     }
+
+    /// Files kept in git are named by git's hash, which is what the listing
+    /// calls blobId: `printf abc | git hash-object --stdin`.
+    @Test func gitFilesAreVerifiedAsGitBlobs() throws {
+        let u = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hf-git-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: u) }
+        try Data("abc".utf8).write(to: u)
+        #expect(try HuggingFaceStore.gitBlobID(of: u)
+                == "f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f")
+    }
+
+    /// thinkspread/Qwen3.5-9B-Vision-CoreML-fp16 as the models API listed it
+    /// on 2026-11-02, trimmed. Before this, files without an `lfs` entry
+    /// were dropped -- and tower_meta.json and model.mil are two of them.
+    @Test func listingKeepsFilesThatLiveInGit() throws {
+        let json = #"""
+        {"sha": "d9c60a715391e8aa3be501d572c6cbfe50e88503", "siblings": [
+         {"rfilename": "qwen35_vit_b1024.mlmodelc/model.mil",
+          "blobId": "6f895271a384624e6503b22238a9dcf02d5f2bdf", "size": 402235},
+         {"rfilename": "qwen35_vit_b1024.mlmodelc/weights/weight.bin",
+          "blobId": "6185f116d0fd2afdd441e9e698011fced03f2f6c", "size": 906734720,
+          "lfs": {"sha256": "a0e26dc2839d2b10003a452c071872580eda37668015258e6d0562c585e119f5",
+                  "size": 906734720, "pointerSize": 134}},
+         {"rfilename": "tower_meta.json",
+          "blobId": "2bb5048c33c02a6ab55c247ed55e9e71926d6722", "size": 1910}]}
+        """#
+        let l = try HuggingFaceStore.parseListing(Data(json.utf8), repo: "o/r")
+        #expect(l.revision == "d9c60a715391e8aa3be501d572c6cbfe50e88503")
+        #expect(l.files.count == 3)
+        let meta = try #require(l.files.first { $0.path == "tower_meta.json" })
+        #expect(!meta.lfs && meta.size == 1910
+                && meta.sha256 == "2bb5048c33c02a6ab55c247ed55e9e71926d6722")
+        let w = try #require(l.files.first { $0.path.hasSuffix("weight.bin") })
+        #expect(w.lfs && w.sha256.hasPrefix("a0e26dc2"))
+    }
+
+    /// A tower's two buckets can share one weights blob; the snapshot links
+    /// both paths to it, and offline it is found by its meta file.
+    @Test func snapshotLinksEveryPathAndSharesBlobs() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hf-snap-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = "o/tower", rev = "r1"
+        let blobs = HuggingFaceStore.repoDir(repo, root: root).appendingPathComponent("blobs")
+        try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: blobs.appendingPathComponent("w"))
+        try Data("{}".utf8).write(to: blobs.appendingPathComponent("m"))
+        let files = [F(path: "a.mlmodelc/weights/weight.bin", size: 7, sha256: "w"),
+                     F(path: "b.mlmodelc/weights/weight.bin", size: 7, sha256: "w"),
+                     F(path: "tower_meta.json", size: 2, sha256: "m", lfs: false)]
+        // Every blob is already there, so this touches no network.
+        let snap = try HuggingFaceStore.fetchSnapshot(files, repo: repo, revision: rev,
+                                                      root: root) { _, _ in }
+        #expect(snap.lastPathComponent == rev)
+        for f in files {
+            #expect(FileManager.default.fileExists(
+                atPath: snap.appendingPathComponent(f.path).resolvingSymlinksInPath().path))
+        }
+        #expect(try String(contentsOf: snap.appendingPathComponent(
+            "b.mlmodelc/weights/weight.bin"), encoding: .utf8) == "weights")
+        #expect(HuggingFaceStore.cachedSnapshot(repo, containing: "tower_meta.json",
+                                                root: root)?.lastPathComponent == rev)
+        #expect(HuggingFaceStore.cachedSnapshot(repo, containing: "nope.json",
+                                                root: root) == nil)
+    }
 }

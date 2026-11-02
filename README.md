@@ -36,6 +36,18 @@ choice for multi-step work; Gemma-4-E4B is faster.
 [manual/claude-code.md](manual/claude-code.md#what-to-expect-time-per-question-and-which-model)
 has the measurements.
 
+Images work too, as an `image_url` data URI to `/v1/chat/completions`.
+Gemma 4 12B brings its own projector; Qwen models take a Core ML vision
+encoder, which `--tower auto` fetches:
+
+```bash
+tempo9 --hf thinkspread/gemma-4-12b-it-Q4_K_S-GGUF
+tempo9 --hf unsloth/Qwen3.5-9B-GGUF:Q4_K_S --tower auto
+```
+
+[manual/limits.md](manual/limits.md#images-need-a-vision-encoder) lists the
+published encoders.
+
 ## Install
 
 Apple Silicon and macOS 26 or later. Any of these installs the signed,

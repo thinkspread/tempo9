@@ -72,7 +72,7 @@ if let ref = arg("ollama") {
         // user wonder why images do nothing.
         let note = "[tempo9] note: this model ships a GGUF vision"
             + " projector, which this path does not load; text only."
-            + " Use --tower <dir>.\n"
+            + " Pass --tower a Core ML directory or Hugging Face repo.\n"
         FileHandle.standardError.write(Data(note.utf8))
     }
 }
@@ -83,6 +83,9 @@ if let ref = arg("ollama") {
 // with huggingface_hub or llama.cpp is reused, not downloaded again.
 var hfGguf: String?
 var hfSize: Int64?
+// Kept for --tower: Gemma 4's projector is usually in the same repo.
+var hfRepo: String?
+var hfListing: HuggingFaceStore.Listing?
 func fileSize(_ u: URL) -> Int64? {
     ((try? FileManager.default.attributesOfItem(
         atPath: u.resolvingSymlinksInPath().path))?[.size] as? NSNumber)?.int64Value
@@ -122,6 +125,8 @@ if let text = arg("hf") {
         hfGguf = c.path
         hfSize = fileSize(c)
     }
+    hfRepo = ref.repo
+    hfListing = listing
     if let listing {
         let file: HuggingFaceStore.RemoteFile
         switch HuggingFaceStore.choose(listing.files, quant: ref.quant) {
@@ -184,7 +189,8 @@ guard let gguf = hfGguf ?? ollamaGguf ?? arg("gguf")
         + " | --ollama <model[:tag]>)"
         + " [--graph <.asgraph>] [--name <id>]\n"
         + "       [--port 11435] [--max-length 32768] [--max-batch 16]"
-        + " [--speculation-k 0] [--tower <dir>]\n"
+        + " [--speculation-k 0]\n"
+        + "       [--tower <dir | mmproj.gguf | owner/repo | auto>]\n"
         + "       tempo9 --list-ollama        models Ollama already pulled\n"
     FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
@@ -220,11 +226,33 @@ do {
 // Optional vision. The tower is what makes the image path OURS rather than
 // the engine's: encoding happens here, and its content-addressed cache is
 // the thing an agent looping over one screenshot actually exercises.
+// What --tower may name, and the pairing check: Towers.swift.
 var tower: VisionTower?
-if let towerDir = arg("tower") {
-    tower = try VisionTower(directory: URL(fileURLWithPath: towerDir))
-    session.mediaLayout = tower?.layout
-    FileHandle.standardError.write(Data("[tempo9] tower: \(towerDir)\n".utf8))
+let identity = ModelIdentity(ggufPath: gguf)
+do {
+    var source: URL?
+    if let spec = arg("tower") {
+        source = try Towers.resolve(spec, model: identity, ggufPath: gguf,
+                                    hfRepo: hfRepo, hfListing: hfListing)
+    } else {
+        source = try Towers.gemmaProjector(model: identity, ggufPath: gguf,
+                                           hfRepo: hfRepo, hfListing: hfListing)
+        if source == nil, let repo = Towers.publishedTower(for: identity) {
+            FileHandle.standardError.write(Data(
+                ("[tempo9] text only; to ask about images add --tower auto"
+                 + " (fetches \(repo))\n").utf8))
+        }
+    }
+    if let source {
+        let t = try Towers.load(source)
+        try Towers.checkPairing(t, model: identity)
+        tower = t
+        session.mediaLayout = t.layout
+        FileHandle.standardError.write(Data("[tempo9] tower: \(source.path)\n".utf8))
+    }
+} catch {
+    FileHandle.standardError.write(Data("[tempo9] tower: \(error)\n".utf8))
+    exit(1)
 }
 
 // Warm up INSIDE the Task and start the listener from there too.

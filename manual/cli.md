@@ -24,7 +24,7 @@ tempo9 --list-ollama
 | `--max-length <n>` | `32768` | Context length the engine is built for, prompt and reply together. Claude Code's baseline prompt alone is ~32k tokens; see [Context length](claude-code.md#context-length). |
 | `--max-batch <n>` | `16` | Concurrent requests the engine schedules. `1` makes the server serial end to end. |
 | `--speculation-k <n>` | `0` | MTP speculation depth (0 = off). The engine varies the effective k downward per request. |
-| `--tower <dir>` | — | Core ML vision tower. Required for image input. |
+| `--tower <dir \| .gguf \| owner/repo \| auto>` | — | The vision encoder, required for image input: a Core ML tower directory (the one holding `tower_meta.json`), a Gemma 4 12B mmproj `.gguf`, a Hugging Face repo holding either (fetched into the Hugging Face cache, as `--hf` is), or `auto` for the published encoder of the loaded model. Without the flag, Gemma 4 12B finds its mmproj beside the GGUF or in the `--hf` repo on its own, and a model with a published encoder gets a one-line hint. The encoder is checked against the model at startup, and a wrong one stops the server. See [Limits](limits.md#images-need-a-vision-encoder). |
 
 There is **no `--token` flag**: nothing is authenticated. See
 [Limits](limits.md#no-authentication).

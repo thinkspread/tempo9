@@ -108,15 +108,17 @@ let engineXCFramework = FileManager.default.fileExists(
 /// own; 1.2.0 ships an engine with Flint support, the bf16 routing GEMV and
 /// the decode fusions measured against rec, and points at its own; 1.2.1
 /// ships an engine whose paged NAX attention splits the head dim across
-/// simdgroups (Gemma 4 96k-token prefill 78 -> 43 s), and points at its own.
+/// simdgroups (Gemma 4 96k-token prefill 78 -> 43 s), and points at its own;
+/// 1.2.2 ships an engine that wraps each weight once and pins dense weights
+/// whole or not at all (Qwen3.8-27B loads on 24 GB), and points at its own.
 /// When set,
 /// a checkout with no engine staged --
 /// every outside developer's -- downloads it and links it like any binary
 /// target; a staged engine still wins, so maintainers test what they build.
 let releaseEngineURL =
-    "https://github.com/thinkspread/tempo9/releases/download/v1.2.1/Tempo9Engine.xcframework.zip"
+    "https://github.com/thinkspread/tempo9/releases/download/v1.2.2/Tempo9Engine.xcframework.zip"
 let releaseEngineChecksum =
-    "7b322781b4b42be229632af33e25b77d5e0b1eb833ef7957d67dbefd89b5d535"
+    "03176833d1c731ff67251c7991ade98e31bec30f56f7765a8807dec7b5344c7d"
 let engineRelease = !engineXCFramework && !engineStaged && !releaseEngineURL.isEmpty
 
 let engineAvailable = engineXCFramework || engineStaged || engineRelease
@@ -255,7 +257,7 @@ if engineAvailable {
                           linkerSettings: engineLinkSettings),
         .executableTarget(name: "Tempo9CLI",
                           dependencies: ["Tempo9", "Tempo9Engine",
-                                         "VisionTowerKit"],
+                                         "VisionTowerKit", "GGUFKit"],
                           path: "Sources/tempo9-cli",
                           linkerSettings: engineLinkSettings),
     ]

@@ -49,7 +49,7 @@ jobs:
       # A skip is not a pass. Both frameworks print a green summary for zero
       # tests, and SwiftPM runs each test bundle separately, so the counts are
       # summed and held to a floor: at the time of writing 28 XCTest
-      # (GGUFKitTests 10, Tempo9Tests 18) and 71 Swift Testing
+      # (GGUFKitTests 10, Tempo9Tests 18) and 74 Swift Testing
       # (Tempo9KitTests). Raise the floors when tests are added; lowering one
       # should be a decision somebody wrote down.
       - name: Test
@@ -63,7 +63,7 @@ jobs:
                | awk '{ s += $4 } END { print s + 0 }')
           echo "XCTest: $xc tests   Swift Testing: $st tests"
           [ "$xc" -ge 28 ] || { echo "::error::XCTest ran $xc tests, expected at least 28"; exit 1; }
-          [ "$st" -ge 71 ] || { echo "::error::Swift Testing ran $st tests, expected at least 71"; exit 1; }
+          [ "$st" -ge 74 ] || { echo "::error::Swift Testing ran $st tests, expected at least 74"; exit 1; }
 
       # Release too. -O has caught things debug did not, and the app links
       # release.

@@ -88,4 +88,4 @@ rewritten, so a re-pulled tag never serves last week's weights.
 - **Trusts the file over the manifest for size**, because a truncated pull
   leaves the advertised size intact and the bytes short.
 - **Does not load a GGUF vision projector.** It is detected and reported;
-  image input needs `--tower`. See [Limits](limits.md#vision-needs-a-core-ml-tower).
+  image input needs `--tower`. See [Limits](limits.md#images-need-a-vision-encoder).

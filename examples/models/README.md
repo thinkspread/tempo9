@@ -35,18 +35,21 @@ than asserting it.
 On a 24 GB machine, run them **one at a time**. Two 15 GiB models resident
 at once drags the system into swap and every number after that is noise.
 
-## Vision needs a Core ML tower, not an mmproj
+## Vision: a Core ML tower for Qwen, the mmproj for Gemma 4 12B
 
-`--tower` takes a **directory containing `tower_meta.json`**, which is the
-`coreml/` subdirectory of an exported tower:
+For Qwen models `--tower` takes a Core ML tower: `auto`, a published one by
+repo name, or a **directory containing `tower_meta.json`**, which is the
+`coreml/` subdirectory of an export:
 
 ```
---tower ~/models/qwen3vl_tower/coreml        # correct
---tower ~/models/qwen3vl_tower               # missingAsset: .../tower_meta.json
---tower ~/models/…/qwen3vl-4b-mmproj.gguf    # same error — a GGUF projector is not a tower
+--tower auto                                         # the published one for this model
+--tower thinkspread/Qwen3-VL-4B-Instruct-Vision-CoreML-fp16
+--tower ~/models/qwen3vl_tower/coreml                # correct
+--tower ~/models/qwen3vl_tower                       # missingAsset: .../tower_meta.json
 ```
 
-A GGUF mmproj beside the model is **not** usable here. The engine's vision
-front end is Core ML; the mmproj is what a tower is exported *from*, offline.
-This is also why an Ollama model carrying a GGUF projector runs text-only —
-Tempo9 reports the projector and tells you it is not loading it.
+A Qwen mmproj beside the model is **not** usable here: the engine's vision
+front end is Core ML, and the mmproj is what a tower is exported *from*,
+offline. Gemma 4 12B is the exception: its encoder-free mmproj is the whole
+front end and is picked up on its own. The list of published encoders is in
+[Limits](../../manual/limits.md#images-need-a-vision-encoder).

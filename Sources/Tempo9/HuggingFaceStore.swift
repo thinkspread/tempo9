@@ -61,10 +61,17 @@ package enum HuggingFaceStore {
     package struct RemoteFile: Equatable, Sendable {
         package let path: String       // repo-relative, may contain '/'
         package let size: Int64
-        package let sha256: String     // LFS oid; the blob's name
+        /// The blob's name.  The LFS sha256 for weights; for a small file
+        /// kept in git rather than LFS -- a vision tower's JSON, a Core ML
+        /// model.mil -- its git blob id, which is what huggingface_hub
+        /// names that blob by too.
+        package let sha256: String
+        /// false: `sha256` is a git blob id, SHA-1 over "blob <size>\0" and
+        /// the bytes, and is verified as one.
+        package let lfs: Bool
 
-        package init(path: String, size: Int64, sha256: String) {
-            self.path = path; self.size = size; self.sha256 = sha256
+        package init(path: String, size: Int64, sha256: String, lfs: Bool = true) {
+            self.path = path; self.size = size; self.sha256 = sha256; self.lfs = lfs
         }
     }
 
@@ -295,19 +302,98 @@ package enum HuggingFaceStore {
         if let e = out.2 { throw FetchError.transport(e.localizedDescription) }
         let code = (out.1 as? HTTPURLResponse)?.statusCode ?? 0
         guard code == 200, let data = out.0 else { throw FetchError.http(code, repo) }
+        return try parseListing(data, repo: repo)
+    }
+
+    /// The models API's answer, as files.  Every file, not just LFS ones:
+    /// a vision tower is a directory, and the two files that say what it is
+    /// (tower_meta.json, each model.mil) are small enough to live in git.
+    /// Dropping them left a tower that could not be loaded.
+    package static func parseListing(_ data: Data, repo: String) throws -> Listing {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let sha = obj["sha"] as? String,
               let sib = obj["siblings"] as? [[String: Any]] else {
             throw FetchError.malformed("unexpected listing for \(repo)")
         }
         let files: [RemoteFile] = sib.compactMap { s in
-            guard let p = s["rfilename"] as? String,
-                  let lfs = s["lfs"] as? [String: Any],
-                  let oid = lfs["sha256"] as? String ?? lfs["oid"] as? String,
-                  let size = (lfs["size"] as? NSNumber)?.int64Value else { return nil }
-            return RemoteFile(path: p, size: size, sha256: oid)
+            guard let p = s["rfilename"] as? String else { return nil }
+            if let lfs = s["lfs"] as? [String: Any],
+               let oid = lfs["sha256"] as? String ?? lfs["oid"] as? String,
+               let size = (lfs["size"] as? NSNumber)?.int64Value {
+                return RemoteFile(path: p, size: size, sha256: oid)
+            }
+            guard let id = s["blobId"] as? String,
+                  let size = (s["size"] as? NSNumber)?.int64Value else { return nil }
+            return RemoteFile(path: p, size: size, sha256: id, lfs: false)
         }
         return Listing(revision: sha, files: files)
+    }
+
+    /// The first `bytes` of a file, for reading a GGUF's header without the
+    /// file: which projector an mmproj holds is in its first kilobytes, and
+    /// the answer decides whether the other 99.9 % is worth fetching.
+    package static func head(_ file: RemoteFile, repo: String, revision: String,
+                             bytes: Int) throws -> Data {
+        let path = file.path.split(separator: "/")
+            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)! }
+            .joined(separator: "/")
+        guard let url = URL(string: "\(endpoint)/\(repo)/resolve/\(revision)/\(path)")
+        else { throw FetchError.malformed("bad file path \(file.path)") }
+        var r = request(url)
+        r.setValue("bytes=0-\(bytes - 1)", forHTTPHeaderField: "Range")
+        let sem = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var out: (Data?, URLResponse?, Error?)
+        URLSession.shared.dataTask(with: r) { d, resp, e in
+            out = (d, resp, e); sem.signal()
+        }.resume()
+        sem.wait()
+        if let e = out.2 { throw FetchError.transport(e.localizedDescription) }
+        let code = (out.1 as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200 || code == 206, let data = out.0 else {
+            throw FetchError.http(code, file.path)
+        }
+        return data.prefix(bytes)
+    }
+
+    /// Every file in `files` into the cache under one snapshot, which is
+    /// returned: a directory laid out as the repo is.  Duplicates by hash
+    /// are fetched once -- a tower's buckets can share one weights blob.
+    package static func fetchSnapshot(
+        _ files: [RemoteFile], repo: String, revision: String, root: URL,
+        progress: @escaping @Sendable (Int64, Int64) -> Void) throws -> URL {
+        var seen = Set<String>()
+        let unique = files.filter { seen.insert($0.sha256).inserted }
+        let total = unique.reduce(0) { $0 + $1.size }
+        var before: Int64 = 0
+        for f in unique {
+            let base = before
+            _ = try fetch(f, repo: repo, revision: revision, root: root) { done, _ in
+                progress(base + done, total)
+            }
+            before += f.size
+        }
+        for f in files {
+            try link(f, repo: repo, revision: revision, root: root)
+        }
+        return repoDir(repo, root: root).appendingPathComponent("snapshots/\(revision)")
+    }
+
+    /// The newest cached snapshot holding `file`, for running offline.
+    package static func cachedSnapshot(_ repo: String, containing file: String,
+                                       root: URL) -> URL? {
+        let dir = repoDir(repo, root: root)
+        let snaps = dir.appendingPathComponent("snapshots")
+        var revs = (try? FileManager.default.contentsOfDirectory(atPath: snaps.path)) ?? []
+        if let main = try? String(contentsOf: dir.appendingPathComponent("refs/main"),
+                                  encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           let i = revs.firstIndex(of: main) {
+            revs.swapAt(0, i)
+        }
+        return revs.lazy.map { snaps.appendingPathComponent($0) }.first {
+            FileManager.default.fileExists(
+                atPath: $0.appendingPathComponent(file).resolvingSymlinksInPath().path)
+        }
     }
 
     /// Download into blobs/<sha256>, resuming a `.incomplete` left by an
@@ -349,7 +435,7 @@ package enum HuggingFaceStore {
                            progress: progress).run()
         }
 
-        let got = try sha256(of: part)
+        let got = file.lfs ? try sha256(of: part) : try gitBlobID(of: part)
         guard got == file.sha256 else {
             try? fm.removeItem(at: part)
             throw FetchError.checksum(expected: file.sha256, got: got)
@@ -363,6 +449,20 @@ package enum HuggingFaceStore {
         let h = try FileHandle(forReadingFrom: url)
         defer { try? h.close() }
         var hasher = SHA256()
+        while let chunk = try h.read(upToCount: 8 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// git's name for a file: SHA-1 over "blob <size>\0" and the bytes.
+    static func gitBlobID(of url: URL) throws -> String {
+        let h = try FileHandle(forReadingFrom: url)
+        defer { try? h.close() }
+        let size = try h.seekToEnd()
+        try h.seek(toOffset: 0)
+        var hasher = Insecure.SHA1()
+        hasher.update(data: Data("blob \(size)\0".utf8))
         while let chunk = try h.read(upToCount: 8 << 20), !chunk.isEmpty {
             hasher.update(data: chunk)
         }

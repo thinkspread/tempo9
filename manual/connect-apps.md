@@ -100,9 +100,10 @@ Worth knowing before you wire something up:
   the Ollama route answers `501` and says so rather than pretending.
 - **One model per process.** `/v1/models` and `/api/tags` report the one
   that is loaded. Run a second server on another port for a second model.
-- **Vision needs a tower.** Image input works with `--tower <dir>`. A GGUF
-  vision projector inside an Ollama model is detected but not loaded; the
-  server tells you when it sees one.
+- **Images need a vision encoder.** Gemma 4 12B brings its own mmproj; Qwen
+  models take `--tower auto`. A GGUF vision projector inside an Ollama model
+  is detected but not loaded; the server tells you when it sees one. See
+  [Limits](limits.md#images-need-a-vision-encoder).
 - **No authentication.** By design, and only defensible because it is
   loopback-bound.
 - **No server-side tools.** Claude Code's WebSearch and WebFetch, code
