@@ -12,6 +12,7 @@ is the directory you want.
 | [Ollama models](ollama-models.md) | You already pulled models with Ollama |
 | [CLI reference](cli.md) | You want every flag |
 | [API reference](api.md) | You are writing a client |
+| [The built-in page](page.md) | You want to ask about an image, or have a camera or screen watched, from a browser |
 | [Limits](limits.md) | Before you design around something we do not do |
 
 Engineering notes — investigations, benchmark method, internal design — live

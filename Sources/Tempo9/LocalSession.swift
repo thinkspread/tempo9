@@ -76,6 +76,20 @@ public struct ImagePlacement: Sendable {
         self.deepstack = deepstack
         self.numDeepstackLayers = numDeepstackLayers
     }
+
+    /// Everything a tower encoding carries, DeepStack included.
+    ///
+    /// Building a placement field by field is how the CLI served Qwen3-VL
+    /// without its DeepStack maps from the day it could serve Qwen3-VL at
+    /// all: `deepstack` defaults to empty, the engine reads an empty plane
+    /// as a text-only request (DeepStackInjectOp: "nothing to add"), and
+    /// nothing anywhere says so.  Use this.
+    public init(_ e: VisionTowerKit.Encoding) {
+        self.init(embedding: e.embedding, tokens: e.tokens, hidden: e.outHidden,
+                  gridH: e.gridH, gridW: e.gridW, contentKey: e.contentKey,
+                  deepstack: e.deepstack,
+                  numDeepstackLayers: e.numDeepstackLayers)
+    }
 }
 
 public struct LocalDelta: Sendable {

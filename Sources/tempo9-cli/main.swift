@@ -269,14 +269,18 @@ Task {
     do {
         let server = OpenAIServer(
             session: session, modelName: name, port: port,
+            // ImagePlacement(_:) carries Qwen3-VL's DeepStack maps; the
+            // field-by-field build this replaced dropped them.
             encodeImage: tower.map { t in
                 { (image: CGImage) async throws -> ImagePlacement? in
-                    let e = try t.encode(image: image)
-                    return ImagePlacement(embedding: e.embedding, tokens: e.tokens,
-                                          hidden: e.outHidden, gridH: e.gridH,
-                                          gridW: e.gridW, contentKey: e.contentKey)
+                    ImagePlacement(try t.encode(image: image))
                 }
             })
+        server.encodeFrame = tower.map { t in
+            { (image: CGImage) async throws -> ImagePlacement? in
+                ImagePlacement(try t.encode(image: image, cached: false))
+            }
+        }
         server.defaultSpeculationK = specK
         // What Ollama's discovery calls report.  Size is read off the
         // file, so it is exact.  Quantization is DERIVED FROM THE NAME and
@@ -306,6 +310,11 @@ Task {
         try server.start()
         FileHandle.standardError.write(Data(
             "[tempo9] http://127.0.0.1:\(port)/v1 as \(name)\n".utf8))
+        if tower != nil {
+            FileHandle.standardError.write(Data(
+                ("[tempo9] page: http://127.0.0.1:\(port)/ -- ask about an "
+                 + "image, or keep an eye on a camera or screen\n").utf8))
+        }
         // Held so the listener is not deallocated the moment this Task ends.
         keptAlive = server
     } catch {

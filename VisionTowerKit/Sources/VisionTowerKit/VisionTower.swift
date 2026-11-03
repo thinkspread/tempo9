@@ -228,8 +228,15 @@ public final class VisionTower {
     /// deep inside a Core ML load with a missing-asset path.
     public var canSeeImages: Bool { omniAudio == nil || omniVision != nil }
 
-    public func encode(image: CGImage) throws -> Encoding {
-        if let gemma { return try encodeGemma(image: image, tower: gemma) }
+    /// `cached: false` neither reads nor fills the embedding cache.  For
+    /// frames nobody will ask about twice -- a watch loop's 1 fps gate
+    /// frames: at 27B's 5120-wide output one 640 px frame is ~9 MB, so a
+    /// cached loop would fill the 1 GiB budget in two minutes and keep it,
+    /// next to a model that already uses most of a 24 GB Mac.
+    public func encode(image: CGImage, cached: Bool = true) throws -> Encoding {
+        if let gemma {
+            return try encodeGemma(image: image, tower: gemma, cached: cached)
+        }
         if let omniVision { return try omniVision.encode(image: image) }
         if omniAudio != nil {
             throw VisionTowerError.missingAsset(
@@ -250,7 +257,7 @@ public final class VisionTower {
                                   gridW: pre.gridW,
                                   fingerprint: bucket.fingerprint)
 
-        if let hit = cache.get(key) {
+        if cached, let hit = cache.get(key) {
             var enc = Self.split(fused: hit, meta: tower.meta,
                                  tokens: pre.patchCount / 4)
             enc.gridH = pre.gridH; enc.gridW = pre.gridW
@@ -266,7 +273,8 @@ public final class VisionTower {
         let towerSeconds = Date().timeIntervalSince(towerStart)
         // The cache stores the FUSED row (main + deepstack): one entry, one
         // key, and the split below is cheap next to the tower.
-        let stored = cache.put(key, embedding: result.embedding)
+        let stored = cached ? cache.put(key, embedding: result.embedding)
+                            : result.embedding
 
         var enc = Self.split(fused: stored, meta: tower.meta,
                              tokens: pre.patchCount / 4)
@@ -322,8 +330,8 @@ public final class VisionTower {
     /// in MERGED units (20x14 = 280 tokens), which is what the prompt's
     /// expanded run has to match — Gemma has no un-merged patch grid to
     /// confuse it with.
-    private func encodeGemma(image: CGImage, tower: Gemma4Tower)
-        throws -> Encoding {
+    private func encodeGemma(image: CGImage, tower: Gemma4Tower,
+                             cached: Bool) throws -> Encoding {
         let preStart = Date()
         let (patches, cols, rows) = try tower.imagePatches(image)
         let preSeconds = Date().timeIntervalSince(preStart)
@@ -332,7 +340,7 @@ public final class VisionTower {
                                   fingerprint: "gemma4/" + tower.matmul.label)
         let tier: ComputeTier = tower.matmul.label == "gpu" ? .gpu : .cpu
 
-        if let hit = cache.get(key) {
+        if cached, let hit = cache.get(key) {
             return Encoding(embedding: hit, tokens: tokens,
                             outHidden: tower.hidden, gridH: rows, gridW: cols,
                             contentKey: key, tier: tier, cacheHit: true,
@@ -342,7 +350,7 @@ public final class VisionTower {
         let towerStart = Date()
         let embedding = try tower.embedPatches(patches, cols: cols, rows: rows)
         let towerSeconds = Date().timeIntervalSince(towerStart)
-        let stored = cache.put(key, embedding: embedding)
+        let stored = cached ? cache.put(key, embedding: embedding) : embedding
         return Encoding(embedding: stored, tokens: tokens,
                         outHidden: tower.hidden, gridH: rows, gridW: cols,
                         contentKey: key, tier: tier, cacheHit: false,

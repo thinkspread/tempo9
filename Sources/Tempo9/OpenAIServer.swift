@@ -10,8 +10,11 @@
 //   POST /v1/responses          (OpenAI Responses; Codex)
 //   GET  /v1/models             (reports the loaded gguf)
 //   GET  /v1/capabilities       (what is served, refused and stripped)
+//   GET  /                      (the built-in page: WebPage.swift)
+//   POST /v1/vision/frame       (one frame through the vision tower, for
+//                                the page's watch gate; never the LLM)
 //
-// Localhost only.  No LAN exposure, no embeddings.
+// Localhost only.  No LAN exposure, no text embeddings.
 //
 // Concurrency is the engine's, not this file's: requests are NOT serialized
 // here (see `gate` below), and the engine batches whatever arrives, up to the
@@ -82,6 +85,12 @@ public final class OpenAIServer: @unchecked Sendable {
     /// It also keeps this file ignorant of towers, which is why it compiled
     /// for a year without one.
     public var encodeImage: ((CGImage) async throws -> ImagePlacement?)?
+
+    /// The same tower for a frame that will not be asked about twice: the
+    /// watch gate's 1 fps samples, which must not fill the tower's
+    /// embedding cache (VisionTower.encode(image:cached:)).  Falls back to
+    /// `encodeImage` when the host does not set it.
+    public var encodeFrame: ((CGImage) async throws -> ImagePlacement?)?
 
     /// MTP speculation depth applied to every request this server serves
     /// (0 = off).  The engine's adaptive verification varies the effective
@@ -241,6 +250,13 @@ public final class OpenAIServer: @unchecked Sendable {
             return
         }
         switch (req.method, req.path) {
+        case ("GET", "/"):
+            // The page is served from the API's own origin, so its calls
+            // need no CORS -- and this server sends none, which keeps every
+            // other site the browser has open from reading local answers.
+            sendRaw(conn, Self.pageResponse(), close: true)
+        case ("POST", "/v1/vision/frame"):
+            await visionFrame(req, conn)
         case ("GET", "/v1/models"):
             // `tempo9` mirrors the tool-type list and points at
             // /v1/capabilities, for clients that only ever read this.
@@ -356,7 +372,12 @@ public final class OpenAIServer: @unchecked Sendable {
             throw ImagePartError(
                 message: "this model has no vision front end loaded")
         }
-        let url = urls[0]
+        return try await encodeImage(try Self.decodeDataURI(urls[0]))
+    }
+
+    /// A base64 `data:` URI, decoded.  Shared by chat and the watch gate so
+    /// both refuse the same things with the same words.
+    static func decodeDataURI(_ url: String) throws -> CGImage {
         guard url.hasPrefix("data:") else {
             throw ImagePartError(
                 message: "only data: URIs are accepted — fetching a remote "
@@ -375,7 +396,144 @@ public final class OpenAIServer: @unchecked Sendable {
               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
             throw ImagePartError(message: "could not decode the image bytes")
         }
-        return try await encodeImage(img)
+        return img
+    }
+
+    // MARK: - watch gate
+
+    /// POST /v1/vision/frame {"image": "data:..."} -> the frame's tower
+    /// embedding, mean-pooled over its tokens and L2-normalised.
+    ///
+    /// This is Eyes On's gate (thinkspread/eyes-on, Watchpoint.swift, from
+    /// its camera measurements): distance is
+    /// 1 - dot of two of these, a real scene change measures 3-9x the noise
+    /// floor, and 0.025 passed ~5% of camera frames with no false fires.
+    /// The page compares; this only encodes, so it holds no per-client
+    /// state and never runs the language model.
+    private func visionFrame(_ req: HTTPRequest, _ conn: NWConnection) async {
+        guard let body = try? JSONSerialization.jsonObject(with: req.body)
+                as? [String: Any],
+              let url = body["image"] as? String else {
+            send(conn, status: "400 Bad Request",
+                 json: ["error": ["message": "image (a data: URI) required"]])
+            return
+        }
+        guard let encode = encodeFrame ?? encodeImage else {
+            send(conn, status: "400 Bad Request",
+                 json: ["error": ["message":
+                    "this model has no vision front end loaded"]])
+            return
+        }
+        do {
+            let img = try Self.decodeDataURI(url)
+            let start = Date()
+            guard let p = try await encode(img) else {
+                send(conn, status: "500 Internal Server Error",
+                     json: ["error": ["message": "the tower returned nothing"]])
+                return
+            }
+            send(conn, json: Self.frameJSON(
+                p, encodeMs: Date().timeIntervalSince(start) * 1000))
+        } catch let e as ImagePartError {
+            send(conn, status: "400 Bad Request",
+                 json: ["error": ["message": e.message]])
+        } catch {
+            send(conn, status: "500 Internal Server Error",
+                 json: ["error": ["message": "frame encode failed: \(error)"]])
+        }
+    }
+
+    /// Mean over the image's tokens, then unit length.  The main embedding
+    /// only: Qwen3-VL's deepstack planes cover the same tokens and would
+    /// only add the same change twice.
+    static func pooledUnit(_ p: ImagePlacement) -> [Float] {
+        let h = p.hidden, n = min(p.tokens, h > 0 ? p.embedding.count / h : 0)
+        var pooled = [Float](repeating: 0, count: max(h, 0))
+        guard h > 0, n > 0 else { return pooled }
+        p.embedding.withUnsafeBufferPointer { e in
+            for t in 0..<n {
+                let base = t * h
+                for c in 0..<h { pooled[c] += e[base + c] }
+            }
+        }
+        var norm: Float = 0
+        for c in 0..<h { norm += pooled[c] * pooled[c] }
+        let inv = norm > 0 ? 1 / norm.squareRoot() : 0
+        for c in 0..<h { pooled[c] *= inv }
+        return pooled
+    }
+
+    /// Region grid for the watch gate: 4 columns x 3 rows.
+    static let regionCols = 4, regionRows = 3
+
+    /// The same mean-then-unit pooling, once per region of the frame.
+    ///
+    /// The whole-frame mean dilutes a local change by its area: replacing
+    /// the centre 10% of a 640x360 frame measured d=0.009 and 30% only
+    /// 0.023, under the 0.025 fire threshold, so a visitor who filled less
+    /// than a third of the picture never woke the model (2026-11-02,
+    /// Qwen3.5-9B tower).  Per region, the page can take the largest change.
+    ///
+    /// Qwen3.5 emits merged tokens block-major (TowerAux.blockMajorRowCol),
+    /// which is row-major over the (gridH/2) x (gridW/2) merged grid.  Any
+    /// other layout returns [] and the page falls back to the whole frame.
+    static func regionUnits(_ p: ImagePlacement) -> [Float] {
+        let h = p.hidden, n = min(p.tokens, h > 0 ? p.embedding.count / h : 0)
+        let mh = p.gridH / 2, mw = p.gridW / 2
+        guard h > 0, n > 0, mh > 0, mw > 0, mh * mw == n else { return [] }
+        let rows = regionRows, cols = regionCols
+        var out = [Float](repeating: 0, count: rows * cols * h)
+        p.embedding.withUnsafeBufferPointer { e in
+            for t in 0..<n {
+                let r = min((t / mw) * rows / mh, rows - 1)
+                let c = min((t % mw) * cols / mw, cols - 1)
+                let dst = (r * cols + c) * h, src = t * h
+                for k in 0..<h { out[dst + k] += e[src + k] }
+            }
+        }
+        for g in 0..<(rows * cols) {
+            var norm: Float = 0
+            for k in 0..<h { norm += out[g * h + k] * out[g * h + k] }
+            let inv = norm > 0 ? 1 / norm.squareRoot() : 0
+            for k in 0..<h { out[g * h + k] *= inv }
+        }
+        return out
+    }
+
+    /// The vector as base64 little-endian float32: 27B's 5120 floats are
+    /// 27 KB this way and three times that as a JSON array, every second.
+    /// The regions ride beside it, 12 more vectors in the same encoding.
+    static func frameJSON(_ p: ImagePlacement, encodeMs: Double)
+        -> [String: Any] {
+        let v = pooledUnit(p)
+        let data = v.withUnsafeBufferPointer { Data(buffer: $0) }
+        var j: [String: Any] = [
+            "object": "vision.frame", "dim": v.count, "tokens": p.tokens,
+            "encode_ms": (encodeMs * 10).rounded() / 10,
+            "embedding_f32": data.base64EncodedString()]
+        let r = regionUnits(p)
+        if !r.isEmpty {
+            j["regions_f32"] = r.withUnsafeBufferPointer { Data(buffer: $0) }
+                .base64EncodedString()
+            j["region_grid"] = [regionRows, regionCols]
+        }
+        return j
+    }
+
+    /// GET / -- the page, with a policy that lets it reach this origin and
+    /// nothing else: whatever the page or a model's answer contains, a
+    /// browser will not send a byte of it off the machine.
+    static func pageResponse() -> Data {
+        let body = Data(WebPage.html.utf8)
+        var head = "HTTP/1.1 200 OK\r\n"
+        head += "Content-Type: text/html; charset=utf-8\r\n"
+        head += "Content-Length: \(body.count)\r\n"
+        head += "Cache-Control: no-store\r\n"
+        head += "Content-Security-Policy: \(WebPage.contentSecurityPolicy)\r\n"
+        head += "X-Content-Type-Options: nosniff\r\n"
+        head += "Referrer-Policy: no-referrer\r\n"
+        head += "Connection: close\r\n\r\n"
+        return Data(head.utf8) + body
     }
 
     // MARK: - chat

@@ -314,11 +314,7 @@ do {
     }
 
     var placement = encoding.map {
-        ImagePlacement(embedding: $0.embedding, tokens: $0.tokens,
-                       hidden: $0.outHidden, gridH: $0.gridH,
-                       gridW: $0.gridW, contentKey: $0.contentKey,
-                       deepstack: $0.deepstack,
-                       numDeepstackLayers: $0.numDeepstackLayers)
+        ImagePlacement($0)
     }
     // A quality comparison asks several questions of one model. Loading the
     // model is minutes and asking is seconds, so the questions come to the
@@ -449,11 +445,7 @@ do {
         if !imagePaths.isEmpty {
             let path = imagePaths[(run - 1) % imagePaths.count]
             placement = try encodeImage(path).map {
-                ImagePlacement(embedding: $0.embedding, tokens: $0.tokens,
-                               hidden: $0.outHidden, gridH: $0.gridH,
-                               gridW: $0.gridW, contentKey: $0.contentKey,
-                               deepstack: $0.deepstack,
-                               numDeepstackLayers: $0.numDeepstackLayers)
+                ImagePlacement($0)
             }
         }
         // --system applies to the single-question path too. It did not,

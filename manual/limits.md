@@ -43,6 +43,10 @@ tempo9 --hf unsloth/Qwen3.5-9B-GGUF:Q4_K_S --tower auto
 A local directory works too: the one containing `tower_meta.json`, which
 for an export is its `coreml/` **subdirectory**, not the parent.
 
+With an encoder loaded, the server also serves a page at
+`http://127.0.0.1:11435/` for asking about images and watching a camera or
+screen: [The built-in page](page.md).
+
 The encoder is checked against the model before the server listens: its
 output width against the model's embedding width, and its family against
 the GGUF architecture (a Qwen3.5 encoder and a Qwen3-VL one are both 2048

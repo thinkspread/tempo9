@@ -69,6 +69,13 @@ client-executed built-ins (`bash_*`, `text_editor_*`, `computer_*`,
 with `TEMPO9_STRIP_UNSUPPORTED_TOOLS=1`. Full rules and the error shape:
 [Claude Code](claude-code.md).
 
+## Vision frames
+
+`POST /v1/vision/frame` with `{"image": "data:..."}` runs only the vision
+encoder and returns the frame as one unit-length vector, for change detection
+(`1 - dot(a, b)` between two frames). It is what the built-in page's watch
+gate calls. Shape and details: [The built-in page](page.md#post-v1visionframe).
+
 ## Authentication
 
 None. See [Limits](limits.md#no-authentication).
