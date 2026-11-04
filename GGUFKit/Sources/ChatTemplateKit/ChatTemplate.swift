@@ -52,11 +52,23 @@ public struct ChatTemplate {
         self.source = source
         self.specialTokens = specialTokens
         do {
-            self.template = try Template(source)
+            self.template = try Template(source, with: Self.hfOptions)
         } catch {
             throw ChatTemplateError.render(String(describing: error))
         }
     }
+
+    /// The environment transformers' apply_chat_template renders with
+    /// (`trim_blocks=True, lstrip_blocks=True`), which llama.cpp mirrors.
+    /// swift-jinja defaults both to false, so a block tag's trailing newline
+    /// reached the prompt: Gemma 4 rendered `<bos>\n\n<|turn>user...` and an
+    /// extra blank line after every system turn.
+    static let hfOptions: Template.Options = {
+        var o = Template.Options()
+        o.trimBlocks = true
+        o.lstripBlocks = true
+        return o
+    }()
 
     public init(gguf: GGUFFile) throws {
         guard let source = gguf.chatTemplate else {

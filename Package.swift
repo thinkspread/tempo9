@@ -290,7 +290,7 @@ let package = Package(
         // "minimal subset" would mean writing an interpreter and then
         // discovering the next model's template needs the next corner of it.
         .package(url: "https://github.com/huggingface/swift-jinja.git",
-                 from: "2.0.0"),
+                 from: "3.0.0"),
     ],
     targets: targets
 )
