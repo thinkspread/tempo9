@@ -1,12 +1,12 @@
                           TEMPO9 ENGINE LICENSE
-                         Version 0.1 -- 2026-09-29
+                         Version 0.2 -- 2026-11-04
 
 Copyright (c) 2024-2026 Jiejing Zhang. All rights reserved.
 
 This License governs the Tempo9 inference engine in binary form. The
-source code in the Tempo9 repository (the Swift SDK, the tempo9 command-line
-program's own code, tools, documentation and examples) is licensed
-separately under the Apache License, Version 2.0 (see LICENSE). Open-source
+source code in the Tempo9 repository (the Swift SDK, the libtempo9_llm
+library of the C/C++ SDK, the tempo9 command-line program's own code, tools,
+documentation and examples) is licensed separately under the Apache License, Version 2.0 (see LICENSE). Open-source
 components included in the engine remain under their own licences (see
 NOTICE and LICENSES/), and nothing in this License limits the rights those
 licences give You in those components.
@@ -17,9 +17,9 @@ licences give You in those components.
 "Licensor" means Jiejing Zhang.
 
 "Engine" means the Tempo9 inference engine in object-code form as the
-Licensor distributes it -- the library in Tempo9Engine.xcframework and the
-engine linked into the tempo9 command-line program -- including the Metal
-kernels embedded in it and any update the Licensor distributes under this
+Licensor distributes it -- the library in Tempo9Engine.xcframework, the
+liballspark_framework library in the C/C++ SDK and the engine linked into the
+tempo9 command-line program -- including the Metal kernels embedded in it and any update the Licensor distributes under this
 License.
 
 "You" means the individual or Legal Entity exercising rights under this

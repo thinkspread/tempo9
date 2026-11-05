@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "package": "Tempo9LLM",
+  "version": "@TEMPO9_LLM_PACKAGE_VERSION@",
+  "provider": {
+    "package": "Tempo9EngineABI",
+    "minimum_version": "1.1",
+    "linkage": "shared"
+  },
+  "private_dependencies": [
+    {
+      "name": "nlohmann/json",
+      "version": "3.12.0",
+      "source": "https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz",
+      "sha256": "42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa",
+      "license": "MIT",
+      "linkage": "header-only-private"
+    },
+    {
+      "name": "llama.cpp jinja",
+      "revision": "162e2bb2e42a0bbf6f9c2d3d8a9eb3cc40b4a4ea",
+      "source": "https://github.com/ggml-org/llama.cpp",
+      "license": "MIT",
+      "linkage": "static-private"
+    },
+    {
+      "name": "utf8proc",
+      "version": "2.11.3",
+      "revision": "e5e799221b45bbb90f5fdc5c69b6b8dfbf017e78",
+      "source": "https://github.com/JuliaStrings/utf8proc.git",
+      "license": "MIT",
+      "linkage": "static-private"
+    },
+    {
+      "name": "llama.cpp tokenizer algorithms",
+      "source": "https://github.com/ggml-org/llama.cpp",
+      "license": "MIT",
+      "linkage": "source-derived-private"
+    }
+  ]
+}

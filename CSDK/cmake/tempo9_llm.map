@@ -1,0 +1,26 @@
+TEMPO9_LLM_1.0 {
+  global:
+    te9_llm_api_version;
+    te9_llm_get_api_table;
+    te9_llm_last_error;
+    te9_llm_pipeline_create;
+    te9_llm_pipeline_destroy;
+    te9_llm_pipeline_render_chat;
+    te9_llm_pipeline_encode;
+    te9_llm_request_start;
+    te9_llm_request_read;
+    te9_llm_request_status;
+    te9_llm_request_finish_reason;
+    te9_llm_request_get_stats;
+    te9_llm_request_matched_stop;
+    te9_llm_request_stop;
+    te9_llm_request_release;
+  local:
+    *;
+};
+
+TEMPO9_LLM_1.2 {
+  global:
+    te9_llm_pipeline_export_prefix_cache;
+    te9_llm_pipeline_import_prefix_cache;
+} TEMPO9_LLM_1.0;

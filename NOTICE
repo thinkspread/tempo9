@@ -64,6 +64,10 @@ from. All are permissive and compatible with Apache-2.0.
     VisionTowerKit/Sources/VisionTowerKit/Gemma4Tower.swift ports two image
     preprocessing routines exactly: calc_size_preserved_ratio and
     resize_bilinear (tools/mtmd). Same licence text as LICENSES/MIT-ggml.txt.
+    The C/C++ SDK's libtempo9_llm (CSDK/) also compiles in llama.cpp's
+    common/jinja chat-template engine, unmodified (CSDK/third_party), and
+    derives its tokenizers from llama.cpp's algorithms. Licence text:
+    LICENSES/MIT-llama.cpp.txt.
 
 ================================================================================
 0b. Swift package dependencies
@@ -156,6 +160,11 @@ http://www.apache.org/licenses/LICENSE-2.0
 --- nlohmann/json --------------------------------------------- MIT License
     Copyright (c) 2013-2025 Niels Lohmann
     JSON parsing (header-only; compiled into the engine archives).
+
+--- utf8proc --------------------------------------------------- MIT License
+    Copyright (c) 2014-2026 by Steven G. Johnson, Jiahao Chen, Tony Kelman,
+    Viral B. Shah, and other contributors listed in the git history.
+    Unicode normalization in the C/C++ SDK's libtempo9_llm.
 
 ================================================================================
 3. Full licence texts

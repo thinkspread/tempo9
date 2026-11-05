@@ -104,7 +104,7 @@ the support matrix, including 10K-context and vision tests.
 
 ## Build apps on it
 
-Two ways, and they are different products rather than two flavours of one:
+Three ways, and they are different products rather than flavours of one:
 
 - **Over HTTP.** Point any OpenAI-compatible client at the running server.
   Nothing to link, any language. Claude Code and Codex speak their own
@@ -114,6 +114,9 @@ Two ways, and they are different products rather than two flavours of one:
   `import Tempo9`, plus `VisionTowerKit` for image input and `GGUFKit` for
   reading model files — holds the engine inside your app: no server, no
   localhost, one copy of the weights. See [docs/swift-sdk.md](docs/swift-sdk.md).
+- **In-process, from C or C++.** The C/C++ SDK is a download on each release:
+  headers, `libtempo9_llm` and the engine, with a CMake package. See
+  [docs/c-sdk.md](docs/c-sdk.md).
 
 ```swift
 .package(url: "https://github.com/thinkspread/tempo9", from: "1.1.2")
@@ -149,8 +152,8 @@ engine, and what this repository can and cannot take. Security issues:
 
 ## License
 
-The source in this repository — the Swift SDK, the `tempo9` CLI, the tools,
-the manual and the examples — is licensed under the **Apache License 2.0**;
+The source in this repository — the Swift SDK, the C/C++ SDK's `libtempo9_llm`,
+the `tempo9` CLI, the tools, the manual and the examples — is licensed under the **Apache License 2.0**;
 see [LICENSE](LICENSE).
 
 The engine is not in this repository and is not covered by that licence. It

@@ -5,6 +5,8 @@ it, you want [`../manual/`](../manual/) and [`../examples/`](../examples/).
 
 - [`swift-sdk.md`](swift-sdk.md) — the Swift package: products, what links
   the engine, and how to build against it
+- [`c-sdk.md`](c-sdk.md) — the C and C++ SDK: what is in the archive, how to
+  build against it, and which models it runs
 - [`support_matrix.md`](support_matrix.md) — which model/quant combinations
   were run, and what each one did
 - [`agent_prompt_crash.md`](agent_prompt_crash.md) — a stack overflow in the
